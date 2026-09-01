@@ -1,0 +1,141 @@
+# =============================================================================
+#  gke-postgresql-statefulset 設定ファイル
+# =============================================================================
+#  使い方:
+#      cp config.toml.template config.toml   (または `make config`)
+#      vi config.toml
+#      make db
+#
+#  ここに書かれている値がそのままデフォルト値です。
+#  config.toml では変更したいキーだけを書けば足ります（未記載のキーは
+#  このファイルの値が使われます）。
+#
+#  環境変数による一時的な上書きも可能です。キー名は CFG_<セクション>_<キー>:
+#      CFG_POSTGRES_REPLICAS=3 CFG_CLUSTER_NUM_NODES=5 make db
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# [gcp] Google Cloud プロジェクトと既定のロケーション
+# -----------------------------------------------------------------------------
+[gcp]
+# 空文字の場合は `gcloud config get-value project` の値を使用します。
+project = ""
+
+# リージョン。cluster.location_type = "regional" のときのクラスタの配置先。
+region = "asia-northeast1"
+
+# ゾーン。cluster.location_type = "zonal" のときのクラスタの配置先。
+zone = "asia-northeast1-a"
+
+
+# -----------------------------------------------------------------------------
+# [cluster] GKE Standard クラスタ (存在しなければ `make db` 実行時に自動作成)
+# -----------------------------------------------------------------------------
+[cluster]
+name = "pg-cluster"
+
+# "zonal"   … gcp.zone に単一ゾーンで作成（安価・検証向け）
+# "regional" … gcp.region に 3 ゾーン構成で作成（num_nodes は「ゾーンあたり」の台数）
+location_type = "zonal"
+
+# ---- ノードのサイズ（任意に指定可能） ----
+machine_type = "e2-standard-4"
+num_nodes = 3
+disk_type = "pd-balanced"      # pd-standard | pd-balanced | pd-ssd
+disk_size_gb = 100
+
+# ノードプールのオートスケール。enable = false なら num_nodes 固定。
+autoscaling = false
+min_nodes = 1
+max_nodes = 6
+
+# ---- クラスタの属性 ----
+# rapid | regular | stable | extended | None ("None" にすると特定バージョンを固定可能)
+release_channel = "regular"
+
+# 空ならリリースチャンネルの既定バージョン。例: "1.33.4-gke.1036000"
+cluster_version = ""
+
+# ノードのイメージ。COS_CONTAINERD 推奨。
+image_type = "COS_CONTAINERD"
+
+# Spot VM を使ってコストを下げる（検証用途向け。ノードが突然停止し得ます）
+spot = false
+
+# Workload Identity を有効化する
+workload_identity = true
+
+# `gcloud container clusters create` にそのまま渡す追加フラグ（上級者向け）
+extra_create_args = ""
+
+
+# -----------------------------------------------------------------------------
+# [postgres] StatefulSet として作る PostgreSQL 本体
+# -----------------------------------------------------------------------------
+[postgres]
+namespace = "database"
+name = "postgres"
+
+# postgres 公式イメージのタグ
+version = "17"
+
+# レプリカ数。1 なら単体構成。2 以上ならストリーミングレプリケーション構成
+# （ordinal 0 がプライマリ、1 以降が pg_basebackup で複製されるスタンバイ）。
+replicas = 1
+
+# ---- ストレージのサイズ（任意に指定可能） ----
+storage_size = "20Gi"
+# GKE 標準の StorageClass: standard-rwo (Balanced PD) | premium-rwo (SSD PD)
+storage_class = "premium-rwo"
+
+# ---- Pod のリソース（任意に指定可能） ----
+cpu_request = "500m"
+cpu_limit = "2"
+memory_request = "1Gi"
+memory_limit = "4Gi"
+
+# ---- 初期作成されるデータベースとユーザ ----
+database = "appdb"
+user = "app"
+# 空の場合は自動生成し .secrets/postgres_password に保存します。
+# （クラスタ上に Secret が既にある場合はそちらの値が再利用されます）
+password = ""
+
+# レプリケーション用ロール（replicas >= 2 のときに使用）
+replication_user = "replicator"
+replication_password = ""
+
+# ---- postgresql.conf のチューニング ----
+shared_buffers = "256MB"
+effective_cache_size = "1GB"
+maintenance_work_mem = "128MB"
+work_mem = "8MB"
+max_connections = 100
+wal_level = "replica"
+max_wal_senders = 10
+max_replication_slots = 10
+log_min_duration_statement = 1000
+
+# postgres 起動時に追加で渡す -c パラメータ（空白区切り、例: "log_statement=all")
+extra_pg_params = ""
+
+# ---- 公開方法 ----
+# true にすると内部 LoadBalancer (VPC 内からのみ到達可能) を追加で作成します。
+internal_lb = false
+
+
+# -----------------------------------------------------------------------------
+# [content] `make db-content` で投入するスキーマ / ダミーデータ
+# -----------------------------------------------------------------------------
+[content]
+# pg_dump 形式 (plain text) のファイル。make db-content はこれを psql で流し込みます。
+dump_file = "sql/dump.sql"
+
+# `make gen-dump` でダミーデータを再生成するときの行数
+rows_customers = 2000
+rows_products = 500
+rows_orders = 8000
+
+# 乱数シード（同じ値なら毎回同じダミーデータが生成されます）
+seed = 20260901

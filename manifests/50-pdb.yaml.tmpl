@@ -1,0 +1,15 @@
+# replicas >= 2 のときだけ作成される。ノードのアップグレード等で
+# 全レプリカが同時に落ちるのを防ぐ。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ${CFG_POSTGRES_NAME}
+  namespace: ${CFG_POSTGRES_NAMESPACE}
+  labels:
+    app: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: ${CFG_POSTGRES_NAME}

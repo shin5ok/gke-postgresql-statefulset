@@ -1,0 +1,200 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ${CFG_POSTGRES_NAME}
+  namespace: ${CFG_POSTGRES_NAMESPACE}
+  labels:
+    app: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/version: "${CFG_POSTGRES_VERSION}"
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+spec:
+  serviceName: ${CFG_POSTGRES_NAME}
+  replicas: ${CFG_POSTGRES_REPLICAS}
+  # ordinal 0 (プライマリ) が Ready になってから 1 以降を起動する。
+  # スタンバイの pg_basebackup がプライマリを必要とするため必須。
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app: ${CFG_POSTGRES_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${CFG_POSTGRES_NAME}
+        app.kubernetes.io/name: postgresql
+        app.kubernetes.io/instance: ${CFG_POSTGRES_NAME}
+      annotations:
+        # ConfigMap が変わったら Pod を作り直すためのチェックサム
+        gke-postgresql-statefulset/scripts-checksum: "${CFG_SCRIPTS_CHECKSUM}"
+    spec:
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsUser: ${CFG_PG_UID}
+        runAsGroup: ${CFG_PG_GID}
+        runAsNonRoot: true
+        fsGroup: ${CFG_PG_GID}
+      affinity:
+        podAntiAffinity:
+          # 可能なら別ノードに分散する (単一ノードでもスケジュール可能なように preferred)
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: ${CFG_POSTGRES_NAME}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: ${CFG_POSTGRES_NAME}
+      initContainers:
+        # ordinal >= 1 の Pod でのみ、プライマリからベースバックアップを取得する
+        - name: bootstrap-replica
+          image: postgres:${CFG_POSTGRES_VERSION}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/opt/bootstrap/bootstrap-replica.sh"]
+          env:
+            - name: PGDATA
+              value: ${CFG_PGDATA}
+            - name: PRIMARY_HOST
+              value: ${CFG_PRIMARY_HOST}
+            - name: REPLICATION_USER
+              value: ${CFG_POSTGRES_REPLICATION_USER}
+            - name: REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${CFG_POSTGRES_NAME}
+                  key: REPLICATION_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: bootstrap
+              mountPath: /opt/bootstrap
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      containers:
+        - name: postgresql
+          image: postgres:${CFG_POSTGRES_VERSION}
+          imagePullPolicy: IfNotPresent
+          args: ${CFG_PG_ARGS_YAML}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          env:
+            - name: PGDATA
+              value: ${CFG_PGDATA}
+            # POSTGRES_USER はスーパーユーザ。アプリ用ロールは初期化スクリプトで作る。
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: ${CFG_POSTGRES_DATABASE}
+            - name: POSTGRES_INITDB_ARGS
+              value: --data-checksums
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${CFG_POSTGRES_NAME}
+                  key: POSTGRES_PASSWORD
+            - name: APP_USER
+              value: ${CFG_POSTGRES_USER}
+            - name: APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${CFG_POSTGRES_NAME}
+                  key: APP_PASSWORD
+            - name: REPLICATION_USER
+              value: ${CFG_POSTGRES_REPLICATION_USER}
+            - name: REPLICATION_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${CFG_POSTGRES_NAME}
+                  key: REPLICATION_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "${CFG_POSTGRES_CPU_REQUEST}"
+              memory: "${CFG_POSTGRES_MEMORY_REQUEST}"
+            limits:
+              cpu: "${CFG_POSTGRES_CPU_LIMIT}"
+              memory: "${CFG_POSTGRES_MEMORY_LIMIT}"
+          # SIGTERM は smart shutdown となり全クライアントの切断を待ってしまうため、
+          # preStop で明示的に fast shutdown を行いデータの整合性を保つ。
+          # -W (完了を待たない) にするのが重要: -w で待つと pg_ctl が PID 1 の
+          # postgres を停止した時点でコンテナが終了し、実行中のフック自身が
+          # kill されて kubelet が FailedPreStopHook を報告してしまう。
+          # -W ならフックは即座に 0 で返り、シャットダウンは猶予期間内に完走する。
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -c
+                  - pg_ctl -D "${CFG_PGDATA}" -m fast -W stop
+          # 初回は initdb に時間がかかるため startupProbe で最大 10 分待つ
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres", "-h", "127.0.0.1", "-p", "5432"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        - name: initdb
+          configMap:
+            name: ${CFG_POSTGRES_NAME}-scripts
+            defaultMode: 0755
+            items:
+              - key: init-01-app-user.sh
+                path: init-01-app-user.sh
+        - name: bootstrap
+          configMap:
+            name: ${CFG_POSTGRES_NAME}-scripts
+            defaultMode: 0755
+            items:
+              - key: bootstrap-replica.sh
+                path: bootstrap-replica.sh
+        # PostgreSQL のパラレルクエリは共有メモリを使うため /dev/shm を拡張する
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: ${CFG_POSTGRES_NAME}
+          app.kubernetes.io/managed-by: gke-postgresql-statefulset
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: ${CFG_POSTGRES_STORAGE_CLASS}
+        resources:
+          requests:
+            storage: ${CFG_POSTGRES_STORAGE_SIZE}

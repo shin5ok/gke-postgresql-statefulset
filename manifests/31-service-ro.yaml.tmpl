@@ -1,0 +1,21 @@
+# 読み取り用エンドポイント。全 Pod (プライマリ + スタンバイ) に負荷分散する。
+# replicas >= 2 のときだけ作成される。
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${CFG_POSTGRES_NAME}-ro
+  namespace: ${CFG_POSTGRES_NAMESPACE}
+  labels:
+    app: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/component: read
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+spec:
+  type: ClusterIP
+  selector:
+    app: ${CFG_POSTGRES_NAME}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql

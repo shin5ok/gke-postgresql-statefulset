@@ -1,0 +1,12 @@
+# ローカル設定（config.toml.template からコピーして使う）
+/config.toml
+
+# 自動生成されるレンダリング済みマニフェスト
+/build/
+
+# 自動生成されたパスワードなどの機密情報
+/.secrets/
+
+# OS / エディタ
+.DS_Store
+*.swp

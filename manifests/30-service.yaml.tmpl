@@ -1,0 +1,44 @@
+# StatefulSet の安定した DNS 名を提供する Headless Service。
+#   ${CFG_POSTGRES_NAME}-0.${CFG_POSTGRES_NAME}.${CFG_POSTGRES_NAMESPACE}.svc.cluster.local
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${CFG_POSTGRES_NAME}
+  namespace: ${CFG_POSTGRES_NAMESPACE}
+  labels:
+    app: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+spec:
+  clusterIP: None
+  # 起動途中の Pod にも DNS 名を割り当てる (レプリカのブートストラップに必要)
+  publishNotReadyAddresses: true
+  selector:
+    app: ${CFG_POSTGRES_NAME}
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+---
+# 書き込み用エンドポイント。常に ordinal 0 (プライマリ) だけを指す。
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${CFG_POSTGRES_NAME}-rw
+  namespace: ${CFG_POSTGRES_NAMESPACE}
+  labels:
+    app: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: ${CFG_POSTGRES_NAME}
+    app.kubernetes.io/component: primary
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+spec:
+  type: ClusterIP
+  selector:
+    app: ${CFG_POSTGRES_NAME}
+    statefulset.kubernetes.io/pod-name: ${CFG_POSTGRES_NAME}-0
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
