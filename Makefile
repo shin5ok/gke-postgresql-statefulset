@@ -48,7 +48,7 @@ show-config: ## 解決後の設定値をすべて表示する
 #  構築
 # -----------------------------------------------------------------------------
 
-cluster: $(CONFIG) ## GKE Standard クラスタを用意する (存在すれば何もしない)
+cluster: $(CONFIG) ## GKE クラスタを用意する (存在すれば何もしない)
 	@$(SCRIPTS)/ensure-cluster.sh
 
 credentials: $(CONFIG) ## kubectl の認証情報を取得する (make cluster と同じ)

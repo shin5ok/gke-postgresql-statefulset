@@ -53,7 +53,7 @@ ready="$(kc -n "${NS}" get statefulset "${NAME}" \
 cat <<INFO
 
 ${C_BOLD}接続情報${C_RESET}
-  クラスタ        : ${CFG_CLUSTER_NAME} (${CFG_CLUSTER_LOCATION})
+  クラスタ        : ${CFG_CLUSTER_NAME} (${CFG_CLUSTER_LOCATION} / ${CFG_CLUSTER_MODE})
   Namespace       : ${NS}
   Ready レプリカ  : ${ready:-0} / ${CFG_POSTGRES_REPLICAS}
   データベース    : ${CFG_POSTGRES_DATABASE}

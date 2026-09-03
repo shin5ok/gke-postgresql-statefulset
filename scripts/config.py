@@ -106,12 +106,25 @@ def validate(cfg: dict) -> None:
             "       config.toml の [gcp] project を設定するか "
             "`gcloud config set project <PROJECT_ID>` を実行してください。")
 
+    if cl["mode"] not in ("autopilot", "standard"):
+        die(f"cluster.mode は 'autopilot' か 'standard' です "
+            f"(指定値: {cl['mode']!r})")
+    autopilot = cl["mode"] == "autopilot"
+
     if cl["location_type"] not in ("zonal", "regional"):
         die(f"cluster.location_type は 'zonal' か 'regional' です "
             f"(指定値: {cl['location_type']!r})")
-    if cl["location_type"] == "zonal" and not gcp["zone"]:
+    if autopilot:
+        # Autopilot クラスタは常にリージョナル (location_type は使われない)
+        if not gcp["region"]:
+            die("cluster.mode = 'autopilot' のとき gcp.region は必須です "
+                "(Autopilot クラスタは常にリージョナルです)")
+        if cl["release_channel"] == "None":
+            die("cluster.mode = 'autopilot' では cluster.release_channel に "
+                "'None' を指定できません (rapid | regular | stable | extended)")
+    elif cl["location_type"] == "zonal" and not gcp["zone"]:
         die("cluster.location_type = 'zonal' のとき gcp.zone は必須です")
-    if cl["location_type"] == "regional" and not gcp["region"]:
+    elif cl["location_type"] == "regional" and not gcp["region"]:
         die("cluster.location_type = 'regional' のとき gcp.region は必須です")
     if gcp["zone"] and gcp["region"] and not gcp["zone"].startswith(gcp["region"]):
         die(f"gcp.zone ({gcp['zone']}) が gcp.region ({gcp['region']}) に属していません")
@@ -169,12 +182,29 @@ def validate(cfg: dict) -> None:
 def derive(cfg: dict) -> dict:
     """他の値から決まる項目を計算する。"""
     gcp, cl, pg = cfg["gcp"], cfg["cluster"], cfg["postgres"]
-    zonal = cl["location_type"] == "zonal"
+    # Autopilot クラスタは常にリージョナルなので location_type は見ない
+    zonal = cl["mode"] == "standard" and cl["location_type"] == "zonal"
     location = gcp["zone"] if zonal else gcp["region"]
+    # Autopilot にはノードプールが無いため、Spot は Pod 側で指定する
+    autopilot_spot = cl["mode"] == "autopilot" and cl["spot"]
     return {
         "CLUSTER_LOCATION": location,
         # gcloud に渡すロケーション指定フラグ
         "CLUSTER_LOCATION_FLAG": ("--zone" if zonal else "--region"),
+        # Spot Pod の指定。YAML のフローマッピングとしてそのまま埋め込む。
+        "POD_NODE_SELECTOR_JSON": (
+            '{"cloud.google.com/gke-spot": "true"}' if autopilot_spot else "{}"
+        ),
+        # nodeSelector に対応する toleration は Autopilot が自動で足してくれるが、
+        # 自分で書いておかないと apply のたびに mutating webhook の警告が出る。
+        "POD_TOLERATIONS_JSON": (
+            '[{"key": "cloud.google.com/gke-spot", "operator": "Equal", '
+            '"value": "true", "effect": "NoSchedule"}]'
+            if autopilot_spot else "[]"
+        ),
+        # Spot の toleration を持つ Pod は Autopilot では猶予期間が最大 25 秒。
+        # 超える値を書くと 25 秒に切り下げられ、やはり警告が出る。
+        "POD_TERMINATION_GRACE": "25" if autopilot_spot else "60",
         # gcloud container clusters get-credentials が作る context 名
         "KUBE_CONTEXT": f"gke_{gcp['project']}_{location}_{cl['name']}",
         # StatefulSet の ordinal 0 (プライマリ) の FQDN

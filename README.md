@@ -1,13 +1,13 @@
 # gke-postgresql-statefulset
 
-GKE Standard クラスタ上に PostgreSQL を **StatefulSet** として、任意のサイズで構築するための Make ベースのツールです。
+GKE 上に PostgreSQL を **StatefulSet** として、任意のサイズで構築するための Make ベースのツールです。クラスタは既定で **Autopilot** として作成します (`[cluster] mode = "standard"` で Standard クラスタにもできます)。
 
 ```console
 $ make db          # クラスタが無ければ作り、PostgreSQL StatefulSet を構築する
 $ make db-content  # スキーマとダミーデータを投入する (pg_dump 形式からロード)
 ```
 
-サイズ（ノード数・マシンタイプ・レプリカ数・ディスク容量・CPU / メモリ）とゾーンは、すべて **`config.toml`** で指定します。
+サイズ（レプリカ数・ディスク容量・CPU / メモリ、Standard ならノード数とマシンタイプ）とロケーションは、すべて **`config.toml`** で指定します。
 
 ---
 
@@ -34,7 +34,23 @@ $ make db-content      # スキーマ + ダミーデータを投入
 $ make psql            # psql で中身を確認する
 ```
 
-`make db` はクラスタの有無を確認し、**存在しなければ `config.toml` の設定で自動作成**します。既にあれば作成をスキップして認証情報の取得だけ行うので、何度実行しても安全です。
+`make db` はクラスタの有無を確認し、**存在しなければ `config.toml` の設定で自動作成**します。既にある場合は `[cluster]` の設定と実際のクラスタを比較し、差分があれば追従します (Autopilot で追従するのはリリースチャンネルのみ。Standard ではノード数の増減・オートスケール・リリースチャンネルを無停止で反映し、マシンタイプなどノードを作り直す変更は確認を求めます)。何度実行しても安全です。
+
+### Autopilot と Standard
+
+| | `mode = "autopilot"` (既定) | `mode = "standard"` |
+| --- | --- | --- |
+| ノード | GKE が Pod の要求に応じて自動で用意する | `machine_type` / `num_nodes` などで自分で指定する |
+| ロケーション | 常にリージョナル (`[gcp] region`) | `location_type` で zonal / regional を選ぶ |
+| 課金 | Pod が要求した CPU・メモリ・ストレージ | ノード (VM) 単位 |
+| `spot = true` | PostgreSQL の Pod を Spot Pod として起動する | ノードプールを Spot VM で作成する |
+| 使われない設定 | `location_type` / `machine_type` / `num_nodes` / `disk_type` / `disk_size_gb` / `autoscaling` / `image_type` / `workload_identity` | — |
+
+Autopilot では Workload Identity・Shielded Nodes・ノードの自動修復 / 自動アップグレードが常に有効で、`release_channel` に `None` は指定できません。
+
+Autopilot で `spot = true` のときは、`nodeSelector` に対応する toleration (`cloud.google.com/gke-spot`) と 25 秒の `terminationGracePeriodSeconds` をマニフェストに書き出します。どちらも省略すると Autopilot が同じ値を補うため、`kubectl apply` のたびに警告が出ます。Spot Pod は退去時の猶予が 25 秒しかないので、停止処理に余裕が欲しい場合は `spot = false` にしてください。
+
+> 既存クラスタの `mode` を後から変えても **変換はされません**。ロケーションもゾーン ⇔ リージョンで変わるため、`make db` は同じ名前の別クラスタを新しく作ろうとします (その場合は警告を出します)。作り直すなら `make destroy-cluster` してから `make db` を実行してください。
 
 ---
 
@@ -47,10 +63,10 @@ $ make psql            # psql で中身を確認する
 project = ""                    # 空なら gcloud config の値
 zone    = "asia-northeast1-a"
 
-[cluster]                       # GKE Standard のサイズ
-machine_type = "e2-standard-4"
-num_nodes    = 3
-disk_size_gb = 100
+[cluster]                       # クラスタの種類とサイズ
+mode         = "autopilot"      # "standard" ならノードプールを自分で持つ
+machine_type = "e2-standard-4"  # mode = "standard" のときだけ使われる
+num_nodes    = 3                # 同上
 
 [postgres]                      # PostgreSQL のサイズ
 replicas       = 1              # 2 以上でストリーミングレプリケーション構成
@@ -67,12 +83,14 @@ shared_buffers = "256MB"
 | `[gcp]` | `project` | *(gcloud の値)* | プロジェクト ID |
 | | `region` / `zone` | `asia-northeast1` / `-a` | 配置先 |
 | `[cluster]` | `name` | `pg-cluster` | クラスタ名 |
-| | `location_type` | `zonal` | `zonal` / `regional` |
-| | `machine_type` | `e2-standard-4` | ノードのマシンタイプ |
-| | `num_nodes` | `3` | ノード数 (regional ならゾーンあたり) |
-| | `disk_type` / `disk_size_gb` | `pd-balanced` / `100` | ノードのブートディスク |
-| | `autoscaling` / `min_nodes` / `max_nodes` | `false` / `1` / `6` | ノードプールの自動スケール |
-| | `spot` | `false` | Spot VM でコスト削減 (検証用) |
+| | `mode` | `autopilot` | `autopilot` / `standard` |
+| | `release_channel` | `regular` | `rapid` / `regular` / `stable` / `extended` / `None` (`None` は Standard のみ) |
+| | `spot` | `false` | Spot でコスト削減 (検証用)。Autopilot では Spot Pod |
+| | `location_type` ※ | `zonal` | `zonal` / `regional` |
+| | `machine_type` ※ | `e2-standard-4` | ノードのマシンタイプ |
+| | `num_nodes` ※ | `3` | ノード数 (regional ならゾーンあたり) |
+| | `disk_type` / `disk_size_gb` ※ | `pd-balanced` / `100` | ノードのブートディスク |
+| | `autoscaling` / `min_nodes` / `max_nodes` ※ | `false` / `1` / `6` | ノードプールの自動スケール |
 | `[postgres]` | `replicas` | `1` | 1 = 単体、2 以上 = レプリケーション構成 |
 | | `storage_size` / `storage_class` | `20Gi` / `premium-rwo` | PVC のサイズと種別 |
 | | `cpu_request` / `cpu_limit` | `500m` / `2` | Pod の CPU |
@@ -82,6 +100,8 @@ shared_buffers = "256MB"
 | | `internal_lb` | `false` | 同一 VPC 向けの内部 LoadBalancer |
 | `[content]` | `dump_file` | `sql/dump.sql` | `make db-content` が読むファイル |
 | | `rows_customers` / `rows_products` / `rows_orders` | `2000` / `500` / `8000` | ダミーデータの行数 |
+
+※ の付いた項目は `mode = "standard"` のときだけ使われます。
 
 設定値は起動前に型と書式が検証され、未知のキーや不正な値はエラーになります。
 
@@ -95,8 +115,9 @@ $ make validate        # 設定・マニフェスト・スクリプトをクラ�
 `config.toml` を書き換えずに、その場限りでサイズを変えられます。
 
 ```console
-$ CFG_POSTGRES_REPLICAS=3 CFG_CLUSTER_NUM_NODES=5 make db
+$ CFG_POSTGRES_REPLICAS=3 CFG_POSTGRES_MEMORY_LIMIT=8Gi make db
 $ CFG_POSTGRES_STORAGE_SIZE=200Gi make db
+$ CFG_CLUSTER_MODE=standard CFG_CLUSTER_NUM_NODES=5 make db
 ```
 
 ---
@@ -105,7 +126,7 @@ $ CFG_POSTGRES_STORAGE_SIZE=200Gi make db
 
 ```mermaid
 flowchart TB
-    subgraph GKE["GKE Standard クラスタ (config.toml で指定したサイズ)"]
+    subgraph GKE["GKE クラスタ (Autopilot / Standard)"]
         subgraph NS["Namespace: database"]
             SVC_RW["Service: postgres-rw<br/>(書き込み → ordinal 0)"]
             SVC_RO["Service: postgres-ro<br/>(読み取り → 全 Pod)"]
@@ -199,8 +220,14 @@ $ make db-dump
 | --- | --- |
 | レプリカ数 | `[postgres] replicas` を変更 → `make db`。`make scale N=3` は `config.toml` を書き換えてから反映するので、次回以降の `make db` でも維持されます。 |
 | ディスク容量 | `[postgres] storage_size` を **増やして** `make db`。既存 PVC は自動で拡張要求されます。<br/>ファイルシステムの拡張完了に Pod の再起動が必要な場合があります (`FileSystemResizePending`)。<br/>Kubernetes は縮小をサポートしないため、減らす場合は `make destroy-db` からの作り直しが必要です。 |
-| CPU / メモリ | `[postgres] cpu_limit` などを変更 → `make db` (ローリング再起動) |
-| ノード数 / マシンタイプ | `[cluster]` を変更 → 既存クラスタには反映されません。`gcloud container clusters resize` を使うか、`make destroy-cluster` から作り直してください。 |
+| CPU / メモリ | `[postgres] cpu_limit` などを変更 → `make db` (ローリング再起動)。Autopilot ではこの要求値がそのまま課金対象で、ノードは自動で用意されます。 |
+| リリースチャンネル | `[cluster] release_channel` を変更 → `make db`。無停止で反映されます (Autopilot / Standard 共通)。 |
+| ノード数 / オートスケール ※ | `[cluster] num_nodes` などを変更 → `make db`。ノードが増減するだけで **DB は無停止**です。 |
+| マシンタイプ / ノードのディスク ※ | `[cluster] machine_type` などを変更 → `make db`。**ノードのローリング置換**が走るため確認を求められます。PVC は保持されますが、ノードが少ない構成では DB が一時停止します。 |
+| Spot VM / イメージタイプ / GKE バージョン ※ | 既存クラスタには自動適用しません。差分があると `make db` が手順を表示します。 |
+| クラスタの種類 (`mode`) | 既存クラスタは変換できません。`make destroy-cluster` → `make db` で作り直してください。 |
+
+※ は `mode = "standard"` のときだけの操作です。Autopilot ではノードのサイズ調整そのものが不要です。
 
 `storage_class` を変えた場合など `volumeClaimTemplates` に差分があるときは、Pod と PVC を残したまま (`--cascade=orphan`) StatefulSet だけを作り直します。既存の PVC はそのまま使われ、新しく増えた ordinal から新しい設定が適用されます。
 
@@ -222,6 +249,7 @@ scripts/
   render.py                     マニフェストのテンプレート展開
   mk-configmap.py               pg-scripts/ から ConfigMap を生成
   qty.py                        リソース量 (20Gi など) の比較
+  cluster-facts.py              既存クラスタの現在値を describe から取り出す
   set-config.py                 config.toml の 1 キーをコメントを保ったまま書き換える
   ensure-cluster.sh             クラスタの存在確認と自動作成
   deploy-db.sh                  レンダリング → apply → 起動待ち
@@ -243,7 +271,17 @@ build/                          レンダリング結果 (gitignore)
 $ kubectl -n database describe pod postgres-0
 ```
 
-ノードのリソース不足がよくある原因です。`[postgres] cpu_request` / `memory_request` を下げるか、`[cluster] machine_type` を大きくしてください。
+Standard ではノードのリソース不足がよくある原因です。`[postgres] cpu_request` / `memory_request` を下げるか、`[cluster] machine_type` / `num_nodes` を大きくしてください。
+
+Autopilot では要求に合うノードが用意されるまで 1〜2 分ほど `Pending` のままになります (初回はこれが普通です)。それ以上続く場合は `Events` を確認してください。Autopilot は Pod の要求値を最小値や CPU:メモリ比 (概ね 1:1〜1:6.5) に合わせて調整するため、`kubectl -n database describe pod postgres-0` に出る実際の要求値と `config.toml` の値がずれることがあります。`spot = true` の場合は Spot の空き容量待ちでも `Pending` になり得ます。
+
+**`kubectl apply` で Autopilot の警告が出る**
+
+```console
+Warning: autopilot-default-resources-mutator:Autopilot updated StatefulSet ...
+```
+
+Autopilot がマニフェストを書き換えたという通知です。`defaulted unspecified 'cpu' resource for containers [...]` なら、そのコンテナに `resources.requests` が無いことが原因です (本ツールが生成するマニフェストは init コンテナを含めて必ず指定しています)。`spot = true` に関する toleration / 猶予期間の警告は出ないように調整済みです。`make render` で生成したマニフェストは `kubectl apply --dry-run=server -f build/40-statefulset.yaml` で適用前に確認できます。
 
 **Pod が `CrashLoopBackOff`**
 

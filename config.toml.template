@@ -22,18 +22,47 @@
 # 空文字の場合は `gcloud config get-value project` の値を使用します。
 project = ""
 
-# リージョン。cluster.location_type = "regional" のときのクラスタの配置先。
+# リージョン。Autopilot クラスタ、および cluster.location_type = "regional" の
+# Standard クラスタの配置先。
 region = "asia-northeast1"
 
-# ゾーン。cluster.location_type = "zonal" のときのクラスタの配置先。
+# ゾーン。cluster.location_type = "zonal" の Standard クラスタの配置先。
 zone = "asia-northeast1-a"
 
 
 # -----------------------------------------------------------------------------
-# [cluster] GKE Standard クラスタ (存在しなければ `make db` 実行時に自動作成)
+# [cluster] GKE クラスタ (存在しなければ `make db` 実行時に自動作成)
 # -----------------------------------------------------------------------------
 [cluster]
 name = "pg-cluster"
+
+# クラスタの種類
+#   "autopilot" … ノードを GKE に任せる Autopilot クラスタ。Pod の要求に応じて
+#                 ノードが自動で用意されます。Autopilot は常にリージョナルで、
+#                 gcp.region に作成されます（location_type は使われません）。
+#   "standard"  … ノードプールを自分で持つ従来のクラスタ。
+mode = "autopilot"
+
+# ---- 共通の属性 ----
+# rapid | regular | stable | extended | None
+# ("None" にして特定バージョンを固定できるのは mode = "standard" のときだけです)
+release_channel = "regular"
+
+# 空ならリリースチャンネルの既定バージョン。例: "1.33.4-gke.1036000"
+cluster_version = ""
+
+# Spot を使ってコストを下げる（検証用途向け。突然停止し得ます）
+#   mode = "autopilot" … PostgreSQL の Pod を Spot Pod として起動する
+#                        (nodeSelector: cloud.google.com/gke-spot=true)
+#   mode = "standard"  … ノードプールを Spot VM で作成する
+spot = false
+
+# `gcloud container clusters create` / `create-auto` にそのまま渡す追加フラグ
+# （上級者向け。空白区切り）
+extra_create_args = ""
+
+
+# ---- ここから下は mode = "standard" のときだけ使われます ----
 
 # "zonal"   … gcp.zone に単一ゾーンで作成（安価・検証向け）
 # "regional" … gcp.region に 3 ゾーン構成で作成（num_nodes は「ゾーンあたり」の台数）
@@ -50,24 +79,11 @@ autoscaling = false
 min_nodes = 1
 max_nodes = 6
 
-# ---- クラスタの属性 ----
-# rapid | regular | stable | extended | None ("None" にすると特定バージョンを固定可能)
-release_channel = "regular"
-
-# 空ならリリースチャンネルの既定バージョン。例: "1.33.4-gke.1036000"
-cluster_version = ""
-
 # ノードのイメージ。COS_CONTAINERD 推奨。
 image_type = "COS_CONTAINERD"
 
-# Spot VM を使ってコストを下げる（検証用途向け。ノードが突然停止し得ます）
-spot = false
-
-# Workload Identity を有効化する
+# Workload Identity を有効化する（Autopilot では常に有効です）
 workload_identity = true
-
-# `gcloud container clusters create` にそのまま渡す追加フラグ（上級者向け）
-extra_create_args = ""
 
 
 # -----------------------------------------------------------------------------
