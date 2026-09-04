@@ -40,6 +40,12 @@ DB = {
     "user": os.environ.get("DB_USER", "app"),
     "sslmode": os.environ.get("DB_SSLMODE", "prefer"),
 }
+# AlloyDB のマネージド接続プーリングはプーラーが 6432 で待ち受ける (直結は 5432)。
+# 6432 で接続できているなら、その経路には必ずプーラーが挟まっている
+# (直結のサーバは 5432 でしか待ち受けないため)。
+POOLER_PORT = 6432
+POOLED = DB["port"] == POOLER_PORT
+
 CONNINFO = psycopg.conninfo.make_conninfo(
     **DB,
     password=os.environ.get("DB_PASSWORD", ""),
@@ -88,6 +94,9 @@ def server_info(conn: psycopg.Connection) -> dict:
         "version_full": version,
         "alloydb_detected": alloydb_params > 0,
         "server_addr": conn.execute("SELECT inet_server_addr()::text AS a").fetchone()["a"],
+        # プーラー経由 (transaction モード) だとリクエストごとに別のサーバ接続が
+        # 割り当てられ得るので、画面を再読み込みするとこの値が変わることがある。
+        "backend_pid": conn.execute("SELECT pg_backend_pid() AS p").fetchone()["p"],
         "ssl": conn.execute(
             "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()"
         ).fetchone()["ssl"],
@@ -110,6 +119,8 @@ def render_index(error: str | None = None, status: int = 200):
         target=TARGET,
         targets=TARGETS,
         db=DB,
+        pooled=POOLED,
+        pooler_port=POOLER_PORT,
         info=info,
         notes=notes,
         error=error,
@@ -154,7 +165,8 @@ def readyz():
             conn.execute("SELECT 1")
     except psycopg.Error as exc:
         return {"ok": False, "target": TARGET, "error": str(exc).strip()}, 503
-    return {"ok": True, "target": TARGET, "host": DB["host"]}, 200
+    return {"ok": True, "target": TARGET, "host": DB["host"],
+            "port": DB["port"], "pooled": POOLED}, 200
 
 
 if __name__ == "__main__":

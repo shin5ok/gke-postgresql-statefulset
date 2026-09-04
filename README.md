@@ -247,6 +247,8 @@ $ make db-dump
 
 Flask + psycopg 3 の最小の Web アプリです。`notes` テーブル (初回アクセス時に無ければ作成) の **一覧と作成** だけを行い、画面上部のバナーに **AlloyDB / PostgreSQL のどちらに接続しているか** を大きく表示します。バナーには設定上の接続先に加えて、接続先サーバの `pg_settings` に `alloydb.*` パラメータがあるかどうかで判定した「実際の接続先」も出るので、設定と実体が食い違っていればその場で分かります。
 
+あわせて **マネージド接続プーリングを経由しているかどうか** も表示します。判定は接続に使ったポートで行います。AlloyDB のプーラーは 6432、データベース本体は 5432 で待ち受けるため、6432 で接続できていればその経路には必ずプーラーが挟まっています。フッターには接続を処理したバックエンドのプロセス ID も出るので、プーラー経由 (transaction モード) で再読み込みするとこの値が変わることがあるのを確認できます。`/readyz` も `{"pooled": true, "port": 6432, ...}` の形で同じ情報を返します。
+
 ```console
 $ make app                 # イメージをビルド (必要なときだけ) して GKE にデプロイ
 $ make app-port-forward    # http://localhost:8080/ で開く
@@ -261,7 +263,7 @@ $ make app-logs            # ログを追う
 | `target` | 接続先 | パスワード | `sslmode` |
 | --- | --- | --- | --- |
 | `postgresql` | `postgres-rw.<namespace>.svc.cluster.local:5432` (StatefulSet のプライマリ) | クラスタ上の Secret `postgres` の `APP_PASSWORD` | `prefer` |
-| `alloydb` | PSC エンドポイントの内部 IP `:5432` | `.secrets/alloydb_app_password` (または `[alloydb] password`) | `require` (AlloyDB は SSL 必須) |
+| `alloydb` | PSC エンドポイントの内部 IP `:5432` (`[alloydb] connection_pooling = true` なら `:6432` のプーラー) | `.secrets/alloydb_app_password` (または `[alloydb] password`) | `require` (AlloyDB は SSL 必須) |
 
 アプリ自身は **環境変数しか見ません** (`DB_TARGET` / `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_SSLMODE`)。`make app` (`scripts/deploy-app.sh`) が `config.toml` からこれらを解決し、ConfigMap `sample-app-config` と Secret `sample-app-db` に入れて Pod に渡します。接続先が変わると Deployment のアノテーション (チェックサム) が変わり、Pod がローリング更新されます。
 
@@ -408,7 +410,7 @@ doc/
   alloydb-psc-setup.md          AlloyDB + PSC を gcloud で構築する手順書 (お客様向けの説明つき)
 app/
   main.py                       サンプル Web アプリ (Flask + psycopg 3)。接続先は環境変数だけで決まる
-  templates/index.html          画面 (上部に AlloyDB / PostgreSQL のバナー)
+  templates/index.html          画面 (上部に AlloyDB / PostgreSQL と接続プーリングのバナー)
   requirements.txt / Dockerfile コンテナイメージの定義
 manifests/
   *.yaml.tmpl                   ${CFG_*} を埋め込む Kubernetes マニフェスト (PostgreSQL)

@@ -197,7 +197,7 @@ password = ""
 # 一方 make alloydb-psql / make alloydb-content は常に 5432 に直結します
 # (transaction モードでは SET などが使えず、dump の投入に失敗するため)。
 # プーラー経由で確認したいときは POOLED=1 make alloydb-psql を使ってください。
-connection_pooling = false
+connection_pooling = true
 
 # プーリングのモード。connection_pooling = true のときだけ使われます。
 #   "transaction" … トランザクション単位でサーバ接続を貸し出す (既定。多重化の効果が高い)

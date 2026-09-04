@@ -15,6 +15,8 @@
     .banner .meta { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity: .95; }
     .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-family: system-ui, sans-serif; background: rgba(255,255,255,.22); }
     .badge.warn { background: #f9ab00; color: #202124; }
+    /* 接続プーリングの状態はひと目で分かるよう白地で目立たせる */
+    .badge.pool { background: #fff; color: var(--accent); font-weight: 700; }
     main { max-width: 960px; margin: 0 auto; padding: 24px 20px 48px; }
     .card { background: #fff; border: 1px solid #e0e3e7; border-radius: 10px; padding: 18px 20px; margin-bottom: 20px; }
     .card h2 { margin: 0 0 12px; font-size: 17px; }
@@ -38,7 +40,15 @@
   <header class="banner">
     <div class="kicker">接続先データベース</div>
     <h1>{{ targets[target].label }}</h1>
-    <div class="detail">{{ targets[target].detail }}</div>
+    <div class="detail">
+      {{ targets[target].detail }}
+      &nbsp;/&nbsp;
+      {% if pooled %}
+        マネージド接続プーリング経由 (ポート {{ pooler_port }})
+      {% else %}
+        接続プーリングなし — データベースに直結 (ポート {{ db.port }})
+      {% endif %}
+    </div>
     <div class="meta">
       <span>host={{ db.host }}:{{ db.port }}</span>
       <span>db={{ db.dbname }}</span>
@@ -47,6 +57,11 @@
       {% if info %}
         <span>{{ info.version }}</span>
         {% if info.ssl %}<span class="badge">SSL</span>{% endif %}
+        {% if pooled %}
+          <span class="badge pool">接続プーリング: 有効</span>
+        {% else %}
+          <span class="badge pool">接続プーリング: 無効 (直結)</span>
+        {% endif %}
         {% if info.alloydb_detected %}
           <span class="badge">alloydb.* パラメータあり = AlloyDB</span>
         {% else %}
@@ -57,6 +72,11 @@
         {% endif %}
       {% else %}
         <span class="badge warn">未接続</span>
+        {% if pooled %}
+          <span class="badge pool">接続プーリング: 有効 (設定上)</span>
+        {% else %}
+          <span class="badge pool">接続プーリング: 無効 (直結)</span>
+        {% endif %}
       {% endif %}
     </div>
   </header>
@@ -103,6 +123,7 @@
     <footer>
       pod: {{ hostname }}
       {% if info and info.server_addr %} / server: {{ info.server_addr }}{% endif %}
+      {% if info and info.backend_pid %} / backend pid: {{ info.backend_pid }}{% if pooled %} (プーラー経由では再読み込みで変わることがあります){% endif %}{% endif %}
       {% if info %} / {{ info.version_full }}{% endif %}
     </footer>
   </main>
