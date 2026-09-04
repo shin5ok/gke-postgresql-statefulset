@@ -53,6 +53,8 @@ resolve_app_db() {
       esac
       ;;
     alloydb)
+      # connection_pooling = true なら 6432 (プーラー)、そうでなければ 5432 (直結)
+      APP_DB_PORT="${CFG_ALLOYDB_PORT}"
       APP_DB_NAME="${CFG_ALLOYDB_DATABASE}"
       APP_DB_USER="${CFG_ALLOYDB_USER}"
       APP_DB_SSLMODE="require"      # AlloyDB は既定で SSL 必須 (ENCRYPTED_ONLY)

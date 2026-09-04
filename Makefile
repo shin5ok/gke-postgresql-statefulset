@@ -113,7 +113,7 @@ alloydb: cluster ## ★ AlloyDB + PSC エンドポイントを作成し、DB と
 alloydb-content: $(CONFIG) ## スキーマとダミーデータを AlloyDB に投入する
 	@$(SCRIPTS)/alloydb-content.sh
 
-alloydb-psql: $(CONFIG) ## AlloyDB に psql を開く (GKE 上の一時 Pod 経由)  例: SUPERUSER=1 make alloydb-psql
+alloydb-psql: $(CONFIG) ## AlloyDB に psql を開く (一時 Pod 経由)  SUPERUSER=1 / POOLED=1 を付けられる
 	@$(SCRIPTS)/alloydb-psql.sh $(ARGS)
 
 alloydb-status: $(CONFIG) ## AlloyDB と PSC エンドポイントの状態・接続情報を表示する

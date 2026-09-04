@@ -189,6 +189,27 @@ user = "app"
 # (postgres ユーザのパスワードは常に自動生成され .secrets/alloydb_superuser_password に保存されます)
 password = ""
 
+# ---- マネージド接続プーリング (Managed Connection Pooling) ----
+# true にするとインスタンス上でプーラーが動き、ポート 6432 で待ち受けます。
+# (AlloyDB の既定は無効。5432 は有効にしても従来どおり直結のまま使えます)
+#
+# サンプルアプリは connection_pooling = true のとき 6432 に接続します。
+# 一方 make alloydb-psql / make alloydb-content は常に 5432 に直結します
+# (transaction モードでは SET などが使えず、dump の投入に失敗するため)。
+# プーラー経由で確認したいときは POOLED=1 make alloydb-psql を使ってください。
+connection_pooling = false
+
+# プーリングのモード。connection_pooling = true のときだけ使われます。
+#   "transaction" … トランザクション単位でサーバ接続を貸し出す (既定。多重化の効果が高い)
+#                    SET / LISTEN / PREPARE / セッションレベルの advisory lock、
+#                    プロトコルレベルの prepared statement は使えません
+#   "session"     … 切断まで同じサーバ接続を割り当てる (制約は少ないが多重化の効果も小さい)
+# ("TRANSACTION" のような大文字で書いても構いません。gcloud に渡すときに変換します)
+pool_mode = "transaction"
+
+# プールサイズなどの詳細は extra_instance_args に
+# --connection-pooling-max-pool-size=100 のように書いて渡してください。
+
 # ---- PSC エンドポイント ----
 # 予約する内部 IP アドレスと転送ルールの名前 (両方に同じ名前を使います)
 psc_endpoint = "alloydb-psc"

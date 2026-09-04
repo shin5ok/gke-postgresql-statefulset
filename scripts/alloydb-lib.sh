@@ -4,6 +4,9 @@
 # PSC エンドポイントは VPC 内からしか到達できないため、GKE クラスタ上に一時的な
 # Pod (postgres イメージ) を立て、その中の psql を kubectl exec で使う。
 #
+# 接続先ポートは既定で 5432 (直結)。マネージド接続プーリング越しに試したい場合は
+# ALLOYDB_PSQL_PORT=6432 を指定する (dump の投入や DDL は直結のまま行うこと)。
+#
 #   alloydb_pod_start superuser|app   Pod を作って Ready まで待つ (スクリプト終了時に自動削除)
 #   alloydb_pod_wait_ready            DB に接続できるようになるまで待つ
 #   alloydb_pod_psql <psql の引数>    Pod 内で psql を実行する (標準入力はそのまま渡る)
@@ -18,7 +21,8 @@ alloydb_pod_cleanup() {
 }
 
 alloydb_pod_start() {
-  local role="$1" user db password ip
+  local role="$1" user db password ip port
+  port="${ALLOYDB_PSQL_PORT:-${CFG_ALLOYDB_DIRECT_PORT}}"
   ip="$(alloydb_psc_ip)"
   [[ -n "${ip}" ]] \
     || die "PSC エンドポイント ${CFG_ALLOYDB_PSC_ENDPOINT} がありません。先に 'make alloydb' を実行してください。"
@@ -51,17 +55,17 @@ alloydb_pod_start() {
   kc get namespace "${ALLOYDB_POD_NS}" >/dev/null 2>&1 \
     || kc create namespace "${ALLOYDB_POD_NS}" >/dev/null
 
-  step "一時 Pod ${ALLOYDB_POD_NS}/${ALLOYDB_POD} を作成します (psql -> ${ip}:5432, user=${user})"
+  step "一時 Pod ${ALLOYDB_POD_NS}/${ALLOYDB_POD} を作成します (psql -> ${ip}:${port}, user=${user})"
   # パスワードは引数ではなく環境変数で python に渡し、マニフェストは標準入力で apply する
   # (手元の ps にも kubectl の引数にも平文を出さないため)
   POD_NAME="${ALLOYDB_POD}" POD_NS="${ALLOYDB_POD_NS}" \
-  PGHOST="${ip}" PGUSER="${user}" PGDATABASE="${db}" PGPASSWORD="${password}" \
+  PGHOST="${ip}" PGPORT="${port}" PGUSER="${user}" PGDATABASE="${db}" PGPASSWORD="${password}" \
   PG_IMAGE="postgres:${CFG_POSTGRES_VERSION}" \
   NODE_SELECTOR="${CFG_POD_NODE_SELECTOR_JSON}" TOLERATIONS="${CFG_POD_TOLERATIONS_JSON}" \
   python3 - <<'PY' | kc apply -f - >/dev/null || die "一時 Pod の作成に失敗しました"
 import json, os
-env = {k: os.environ[k] for k in ("PGHOST", "PGUSER", "PGDATABASE", "PGPASSWORD")}
-env.update(PGPORT="5432", PGSSLMODE="require", PGCONNECT_TIMEOUT="10")
+env = {k: os.environ[k] for k in ("PGHOST", "PGPORT", "PGUSER", "PGDATABASE", "PGPASSWORD")}
+env.update(PGSSLMODE="require", PGCONNECT_TIMEOUT="10")
 pod = {
     "apiVersion": "v1",
     "kind": "Pod",

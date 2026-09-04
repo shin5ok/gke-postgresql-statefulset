@@ -704,7 +704,7 @@ Warning: autopilot-default-resources-mutator:Autopilot updated Pod app/alloydb-s
 | --- | --- | --- |
 | 手順 1: API 有効化 | `make alloydb` | `scripts/ensure-alloydb.sh` (`enable_apis`) |
 | 手順 2: クラスタ作成 | `make alloydb` | 同上。パスワードは自動生成され `.secrets/alloydb_superuser_password` に保存されます |
-| 手順 3: インスタンス作成 | `make alloydb` | 同上。サイズは `config.toml` の `[alloydb]` で指定します |
+| 手順 3: インスタンス作成 | `make alloydb` | 同上。サイズと接続プーリングは `config.toml` の `[alloydb]` で指定します |
 | 手順 4: PSC エンドポイント作成 | `make alloydb` | 同上。GKE クラスタの VPC を自動的に判別します |
 | 手順 5: ロール / DB 作成 | `make alloydb` | 同上。一時 Pod を自動生成・自動削除します |
 | 手順 6: 接続確認 | `make alloydb-status` / `make alloydb-psql` | `scripts/alloydb-status.sh` |
@@ -733,6 +733,50 @@ gcloud alloydb instances create "${ADB_INSTANCE}" \
 **対応リージョン**: `asia-east1`, `asia-southeast1`, `us-central1`, `us-east1`, `us-east4`, `europe-west1`, `europe-west2`, `europe-west3`, `europe-west4`
 
 > `asia-northeast1` (東京) では 1 vCPU シェイプを利用できません。東京リージョンでの最小構成は 2 vCPU となります。
+
+### マネージド接続プーリングを有効にする
+
+インスタンス上でプーラー (PgBouncer 互換) を動かし、接続の確立コストを下げます。**AlloyDB の既定は無効** です。短命な接続が多いアプリケーションや、接続数が急増しうるワークロードに向いています。
+
+```bash
+# 作成時に有効にする
+gcloud alloydb instances create "${ADB_INSTANCE}" \
+  --project "${PROJECT_ID}" --region "${REGION}" --cluster "${ADB_CLUSTER}" \
+  --instance-type PRIMARY --availability-type ZONAL --cpu-count "${ADB_CPU_COUNT}" \
+  --allowed-psc-projects "${PROJECT_ID}" \
+  --enable-connection-pooling \
+  --connection-pooling-pool-mode TRANSACTION
+
+# 既存インスタンスで有効にする
+gcloud alloydb instances update "${ADB_INSTANCE}" \
+  --cluster "${ADB_CLUSTER}" --region "${REGION}" --project "${PROJECT_ID}" \
+  --enable-connection-pooling
+
+# 状態を確認する (有効なら True)
+gcloud alloydb instances describe "${ADB_INSTANCE}" \
+  --cluster "${ADB_CLUSTER}" --region "${REGION}" --project "${PROJECT_ID}" \
+  --format='value(connectionPoolConfig.enabled)'
+
+# 無効にする (6432 への既存接続はすべて切断されます)
+gcloud alloydb instances update "${ADB_INSTANCE}" \
+  --cluster "${ADB_CLUSTER}" --region "${REGION}" --project "${PROJECT_ID}" \
+  --no-enable-connection-pooling
+```
+
+有効にするときは、以下にご注意ください。
+
+| 項目 | 内容 |
+| --- | --- |
+| **ポート** | プーラーは **6432** で待ち受けます。5432 の直結はそのまま残るので、アプリケーションの接続先ポートを変えない限りプーリングは効きません |
+| モード | 既定は `transaction`。`--connection-pooling-pool-mode SESSION` も選べます。**gcloud のフラグは `TRANSACTION` / `SESSION` と大文字で指定します** (API が返す値は小文字です) |
+| `transaction` モードの制約 | `SET`/`RESET`、`LISTEN`、`WITH HOLD CURSOR`、`PREPARE`/`DEALLOCATE`、`PRESERVE`/`DELETE ROW` の一時テーブル、`LOAD`、セッションレベルの advisory lock、プロトコルレベルの prepared statement が使えません |
+| prepared statement | `--connection-pooling-max-prepared-statements` の既定は **0** です。`transaction` モードで使うなら 1 以上にします |
+| 対応する接続方式 | public IP は非対応です。Private Service Connect は対応しています |
+| ロール | `REPLICATION` 権限を持つユーザからの接続は非対応です |
+| SSL | インスタンスの SSL モードがそのままプーラーにも適用されます (`sslmode=require` のままで問題ありません) |
+| 統計 | ポート 6432 の `alloydb_mcp_stats_<N>` データベースに接続すると `SHOW POOLS;` などの PgBouncer 互換コマンドが使えます。事前に `--connection-pooling-stats-users` で接続を許可するユーザを指定してください |
+
+> **本書の手順 5 (ロールとデータベースの作成) と、`pg_dump` 形式のファイルの投入は 5432 の直結で行ってください。** これらは `SET` を含むため、`transaction` モードのプーラー越しでは失敗します。
 
 ### 本番向けの高可用性構成
 
@@ -829,5 +873,6 @@ AlloyDB の費用は主に以下の要素で構成されます (詳細および�
 - [Private Service Connect を使用して接続する](https://cloud.google.com/alloydb/docs/configure-private-service-connect)
 - [AlloyDB のマシンタイプを選択する](https://cloud.google.com/alloydb/docs/choose-machine-type)
 - [インスタンスを開始、停止、再起動する](https://cloud.google.com/alloydb/docs/instance-start-stop-restart)
+- [マネージド接続プーリングを構成する](https://cloud.google.com/alloydb/docs/configure-managed-connection-pooling)
 - [Private Service Connect の概要](https://cloud.google.com/vpc/docs/private-service-connect)
 - 本リポジトリの [README.md](../README.md) — `make` による自動化された手順

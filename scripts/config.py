@@ -211,6 +211,12 @@ def validate(cfg: dict) -> None:
         if m and int(m.group(1)) != adb["cpu_count"]:
             die(f"alloydb.cpu_count ({adb['cpu_count']}) が alloydb.machine_type "
                 f"({adb['machine_type']}) の vCPU 数と一致しません")
+    if adb["pool_mode"].lower() not in ("transaction", "session"):
+        die(f"alloydb.pool_mode は 'transaction' か 'session' です "
+            f"(指定値: {adb['pool_mode']!r})")
+    # AlloyDB の API は小文字を返すので小文字に揃える。
+    # (gcloud のフラグだけは大文字を要求するため、渡す直前に大文字化する)
+    adb["pool_mode"] = adb["pool_mode"].lower()
     if adb["database"] == "postgres":
         die("alloydb.database に 'postgres' は指定できません（管理用 DB のため）")
     if adb["user"] == "postgres":
@@ -289,6 +295,12 @@ def derive(cfg: dict) -> dict:
         "REPO_ROOT": str(ROOT),
         # ---- AlloyDB ----
         "ALLOYDB_REGION": adb["region"] or gcp["region"],
+        # アプリが接続するポート。マネージド接続プーリングを有効にすると
+        # プーラーが 6432 で待ち受ける (5432 は直結のまま残る)。
+        "ALLOYDB_PORT": "6432" if adb["connection_pooling"] else "5432",
+        # 管理用 (psql / dump の投入) は常に直結。transaction モードのプーラー越しでは
+        # dump.sql の先頭にある SET が実行できないため。
+        "ALLOYDB_DIRECT_PORT": "5432",
         # ---- サンプルアプリ ----
         # StatefulSet 側の書き込みエンドポイント (クラスタ内 DNS 名)
         "APP_DB_HOST_POSTGRESQL": f"{pg['name']}-rw.{pg['namespace']}.svc.cluster.local",

@@ -129,6 +129,7 @@ target = "postgresql"           # "alloydb" にすると AlloyDB に接続する
 | | `database_version` | `POSTGRES_17` | `POSTGRES_14` 〜 `POSTGRES_18` |
 | | `machine_type` / `cpu_count` | *(空)* / `2` | 空なら N2 (`n2-highmem-<cpu_count>`、最小 2 vCPU / 16 GB)。C4A 対応リージョンでは `c4a-highmem-1` + `1` が最小 |
 | | `availability_type` | `ZONAL` | `ZONAL` (単一ノード) / `REGIONAL` (HA) |
+| | `connection_pooling` / `pool_mode` | `false` / `transaction` | マネージド接続プーリング。`true` でプーラーが 6432 で待ち受け、アプリの接続先もそこになる |
 | | `database` / `user` / `password` | `appdb` / `app` / *(自動生成)* | 初期作成される DB とユーザ (StatefulSet と同じ名前) |
 | | `psc_endpoint` / `psc_ip` | `alloydb-psc` / *(自動割り当て)* | PSC エンドポイント (予約 IP と転送ルール) の名前と IP |
 | `[app]` | `target` | `postgresql` | **接続先**: `postgresql` (StatefulSet) / `alloydb` |
@@ -311,6 +312,27 @@ $ make destroy-alloydb    # 転送ルール → クラスタ (インスタンス
 
 接続は IP 直接 + `sslmode=require` です (AlloyDB のインスタンスは既定で SSL 必須。CA 検証は行いません)。AlloyDB が発行する DNS 名 (`*.alloydb-psc.goog`) は言語コネクタや Auth Proxy 向けのもので、本ツールでは使いません。
 
+### マネージド接続プーリング
+
+`[alloydb] connection_pooling = true` にして `make alloydb` を実行すると、インスタンス上でプーラー (PgBouncer 互換) が動きます。AlloyDB の既定は無効です。既存インスタンスにも `make alloydb` で追従します。
+
+```console
+$ CFG_ALLOYDB_CONNECTION_POOLING=true make alloydb   # 一時的に試す
+$ make alloydb-status                                # 有効/無効とモードを表示
+$ POOLED=1 make alloydb-psql                         # プーラー経由で psql を開く
+```
+
+| | 直結 | プーラー |
+| --- | --- | --- |
+| ポート | 5432 (プーリングを有効にしても残ります) | 6432 |
+| 使う人 | `make alloydb-psql` / `make alloydb-content` | サンプルアプリ (`connection_pooling = true` のとき自動でこちら) |
+
+`pool_mode` の既定は `transaction` です。トランザクション単位でサーバ接続を貸し出すため多重化の効果が高い一方、`SET` / `LISTEN` / `PREPARE` / `WITH HOLD CURSOR` / セッションレベルの advisory lock / プロトコルレベルの prepared statement が使えません。制約を避けたい場合は `pool_mode = "session"` にしてください。
+
+> **管理系のコマンドは常に 5432 に直結します。** `sql/dump.sql` は先頭に `SET` を含むため、transaction モードのプーラー越しでは投入に失敗します。
+>
+> プールサイズなどの詳細な設定は `[alloydb] extra_instance_args` に `--connection-pooling-max-pool-size=100` のように書いて渡してください。なお `public` IP 接続と `REPLICATION` ロールのユーザはプーリング非対応です (本構成は PSC + `app` ロールなのでどちらも該当しません)。
+
 ### サイズとコスト
 
 * 既定の `cpu_count = 2` / `availability_type = "ZONAL"` は AlloyDB で作れる中で最小の N2 構成です。**アクセスが無くてもインスタンスが起動している限り課金されます**。使い終わったら `make destroy-alloydb` してください。しばらく使わないだけなら停止もできます (`gcloud alloydb instances update <instance> --cluster <cluster> --region <region> --activation-policy NEVER`。停止中は vCPU / メモリの課金が止まり、ストレージとバックアップの課金は継続します)。
@@ -336,7 +358,7 @@ $ make destroy-alloydb    # 転送ルール → クラスタ (インスタンス
 | `make db-dump` | 稼働中の DB から `pg_dump` を取得する |
 | `make alloydb` | **AlloyDB + PSC エンドポイントを作成し、DB とユーザを初期化** |
 | `make alloydb-content` | スキーマとダミーデータを AlloyDB に投入 |
-| `make alloydb-psql` | AlloyDB に psql を開く (GKE 上の一時 Pod 経由。`SUPERUSER=1` で postgres ユーザ) |
+| `make alloydb-psql` | AlloyDB に psql を開く (GKE 上の一時 Pod 経由。`SUPERUSER=1` で postgres ユーザ、`POOLED=1` でプーラー経由) |
 | `make alloydb-status` | AlloyDB と PSC エンドポイントの状態・接続情報を表示 |
 | `make app` | **サンプルアプリをビルド (必要なら) してデプロイ** |
 | `make app-image` | イメージをビルドして Artifact Registry に push (`FORCE_BUILD=1` で強制) |

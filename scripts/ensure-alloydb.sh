@@ -7,6 +7,9 @@
 #   3. プライマリインスタンスの作成 (--allowed-psc-projects に自プロジェクト) … 無ければ
 #   4. PSC エンドポイント = 予約 IP + 転送ルールを GKE クラスタと同じ VPC に作成 … 無ければ
 #   5. GKE 上の一時 Pod から psql で接続し、アプリ用ロールとデータベースを作成
+#
+#   [alloydb] connection_pooling = true のときはマネージド接続プーリングも有効にする
+#   (プーラーは 6432 で待ち受ける。5432 の直結はそのまま残る)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_config
@@ -83,6 +86,43 @@ wait_ready() {
   die "${kind} が READY になりません。'make alloydb-status' で確認してください。"
 }
 
+# 既存インスタンスのマネージド接続プーリング設定を config.toml に合わせる。
+reconcile_pooling() {
+  local live_enabled live_mode
+  live_enabled="$(instance_field connectionPoolConfig.enabled)"
+  # gcloud は True / False / 空 を返す
+  if [[ "${live_enabled,,}" == "true" ]]; then live_enabled="true"; else live_enabled="false"; fi
+  live_mode="$(instance_field connectionPoolConfig.flags.pool_mode)"
+  # API は小文字 (transaction / session) を返す
+  live_mode="${live_mode,,}"
+  [[ -z "${live_mode}" ]] && live_mode="transaction"
+
+  if [[ "${CFG_ALLOYDB_CONNECTION_POOLING}" != "${live_enabled}" ]]; then
+    if [[ "${CFG_ALLOYDB_CONNECTION_POOLING}" == "true" ]]; then
+      step "マネージド接続プーリングを有効化します (mode: ${CFG_ALLOYDB_POOL_MODE}, ポート 6432)"
+      gcloud alloydb instances update "${INSTANCE}" --cluster "${CLUSTER}" \
+        --region "${REGION}" --project "${PROJECT}" \
+        --enable-connection-pooling \
+        --connection-pooling-pool-mode "${CFG_ALLOYDB_POOL_MODE^^}" --quiet \
+        || die "マネージド接続プーリングの有効化に失敗しました。"
+    else
+      warn "マネージド接続プーリングを無効化します。ポート 6432 への既存接続はすべて切断されます。"
+      gcloud alloydb instances update "${INSTANCE}" --cluster "${CLUSTER}" \
+        --region "${REGION}" --project "${PROJECT}" \
+        --no-enable-connection-pooling --quiet \
+        || die "マネージド接続プーリングの無効化に失敗しました。"
+    fi
+  elif [[ "${CFG_ALLOYDB_CONNECTION_POOLING}" == "true" \
+          && "${CFG_ALLOYDB_POOL_MODE}" != "${live_mode}" ]]; then
+    # ここに来るのはモードだけが違うとき
+    step "プーリングのモードを ${live_mode} -> ${CFG_ALLOYDB_POOL_MODE} に変更します"
+    gcloud alloydb instances update "${INSTANCE}" --cluster "${CLUSTER}" \
+      --region "${REGION}" --project "${PROJECT}" \
+      --connection-pooling-pool-mode "${CFG_ALLOYDB_POOL_MODE^^}" --quiet \
+      || die "プーリングモードの変更に失敗しました。"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 何を作るかを先に確認する
 # ---------------------------------------------------------------------------
@@ -103,6 +143,9 @@ if (( ${#to_create[@]} > 0 )); then
   size_note="N2 ${CFG_ALLOYDB_CPU_COUNT} vCPU (n2-highmem-${CFG_ALLOYDB_CPU_COUNT})"
   [[ -n "${CFG_ALLOYDB_MACHINE_TYPE}" ]] \
     && size_note="${CFG_ALLOYDB_MACHINE_TYPE} (${CFG_ALLOYDB_CPU_COUNT} vCPU)"
+  pooling_note="無効 (アプリは 5432 に直接接続します)"
+  [[ "${CFG_ALLOYDB_CONNECTION_POOLING}" == "true" ]] \
+    && pooling_note="有効 / ${CFG_ALLOYDB_POOL_MODE} モード (アプリは 6432 のプーラーに接続します)"
   cat <<SUMMARY
 
   ${C_BOLD}作成する AlloyDB リソース${C_RESET}
@@ -112,6 +155,7 @@ if (( ${#to_create[@]} > 0 )); then
     インスタンス      : ${INSTANCE}  ${size_note}, ${CFG_ALLOYDB_AVAILABILITY_TYPE}
     PSC エンドポイント: ${ENDPOINT} (GKE クラスタ ${CFG_CLUSTER_NAME} と同じ VPC)
     データベース      : ${CFG_ALLOYDB_DATABASE} (所有者: ${CFG_ALLOYDB_USER})
+    接続プーリング    : ${pooling_note}
 
   ${C_DIM}今回作成するもの:$(printf '\n    - %s' "${to_create[@]}")${C_RESET}
 
@@ -175,6 +219,7 @@ if [[ -n "${instance_state}" ]]; then
        gcloud alloydb instances update ${INSTANCE} --cluster ${CLUSTER} --region ${REGION} \\
          --project ${PROJECT} --allowed-psc-projects ${PROJECT}"
   fi
+  reconcile_pooling
 else
   args=(
     alloydb instances create "${INSTANCE}"
@@ -188,6 +233,11 @@ else
     --labels "managed-by=gke-postgresql-statefulset"
   )
   [[ -n "${CFG_ALLOYDB_MACHINE_TYPE}" ]] && args+=(--machine-type "${CFG_ALLOYDB_MACHINE_TYPE}")
+  if [[ "${CFG_ALLOYDB_CONNECTION_POOLING}" == "true" ]]; then
+    # gcloud のフラグは SESSION / TRANSACTION (大文字) のみ受け付ける
+    args+=(--enable-connection-pooling
+           --connection-pooling-pool-mode "${CFG_ALLOYDB_POOL_MODE^^}")
+  fi
   if [[ -n "${CFG_ALLOYDB_EXTRA_INSTANCE_ARGS}" ]]; then
     read -r -a extra <<<"${CFG_ALLOYDB_EXTRA_INSTANCE_ARGS}"
     args+=("${extra[@]}")
@@ -324,14 +374,15 @@ cat <<INFO
 
 ${C_BOLD}AlloyDB 接続情報${C_RESET}
   クラスタ / インスタンス : ${CLUSTER} / ${INSTANCE} (${REGION})
-  PSC エンドポイント      : ${endpoint_ip}:5432 (${ENDPOINT}, VPC 内からのみ到達可能)
+  PSC エンドポイント      : ${endpoint_ip} (${ENDPOINT}, VPC 内からのみ到達可能)
+  ポート                  : 5432 (直結)$(if [[ "${CFG_ALLOYDB_CONNECTION_POOLING}" == "true" ]]; then printf ' / 6432 (マネージド接続プーリング: %s モード)' "${CFG_ALLOYDB_POOL_MODE}"; fi)
   データベース            : ${CFG_ALLOYDB_DATABASE}
   ユーザ                  : ${CFG_ALLOYDB_USER}
   パスワード              : $(if [[ -n "${CFG_ALLOYDB_PASSWORD}" ]]; then echo "config.toml の値"; else echo ".secrets/alloydb_app_password"; fi)
   postgres ユーザ         : .secrets/alloydb_superuser_password
 
-  ${C_DIM}# クラスタ内 (VPC 内) から${C_RESET}
-  postgresql://${CFG_ALLOYDB_USER}@${endpoint_ip}:5432/${CFG_ALLOYDB_DATABASE}?sslmode=require
+  ${C_DIM}# クラスタ内 (VPC 内) から (サンプルアプリはこのポートに接続します)${C_RESET}
+  postgresql://${CFG_ALLOYDB_USER}@${endpoint_ip}:${CFG_ALLOYDB_PORT}/${CFG_ALLOYDB_DATABASE}?sslmode=require
 
   ${C_DIM}# スキーマとダミーデータを投入する${C_RESET}
   make alloydb-content
