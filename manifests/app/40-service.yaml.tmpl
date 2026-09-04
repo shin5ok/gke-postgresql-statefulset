@@ -1,0 +1,19 @@
+# app.service_type = "ClusterIP" なら make app-port-forward で閲覧する。
+# "LoadBalancer" なら外部 IP が付与され、誰からでも到達できる (検証用途のみ推奨)。
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${CFG_APP_NAME}
+  namespace: ${CFG_APP_NAMESPACE}
+  labels:
+    app: ${CFG_APP_NAME}
+    app.kubernetes.io/name: sample-app
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+spec:
+  type: ${CFG_APP_SERVICE_TYPE}
+  selector:
+    app: ${CFG_APP_NAME}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,17 @@
+# アプリの接続先。config.toml の [app] target から deploy-app.sh が組み立てる。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${CFG_APP_NAME}-config
+  namespace: ${CFG_APP_NAMESPACE}
+  labels:
+    app: ${CFG_APP_NAME}
+    app.kubernetes.io/name: sample-app
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+data:
+  DB_TARGET: "${CFG_APP_TARGET}"
+  DB_HOST: "${CFG_APP_DB_HOST}"
+  DB_PORT: "${CFG_APP_DB_PORT}"
+  DB_NAME: "${CFG_APP_DB_NAME}"
+  DB_USER: "${CFG_APP_DB_USER}"
+  DB_SSLMODE: "${CFG_APP_DB_SSLMODE}"

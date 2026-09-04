@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ targets[target].label }} sample app</title>
+  <style>
+    :root { --accent: {{ targets[target].color }}; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif; color: #202124; background: #f6f7f9; }
+    .banner { background: var(--accent); color: #fff; padding: 22px 28px; }
+    .banner .kicker { font-size: 13px; opacity: .85; letter-spacing: .08em; text-transform: uppercase; }
+    .banner h1 { margin: 4px 0 6px; font-size: 34px; font-weight: 700; }
+    .banner .detail { font-size: 15px; opacity: .95; }
+    .banner .meta { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; opacity: .95; }
+    .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-family: system-ui, sans-serif; background: rgba(255,255,255,.22); }
+    .badge.warn { background: #f9ab00; color: #202124; }
+    main { max-width: 960px; margin: 0 auto; padding: 24px 20px 48px; }
+    .card { background: #fff; border: 1px solid #e0e3e7; border-radius: 10px; padding: 18px 20px; margin-bottom: 20px; }
+    .card h2 { margin: 0 0 12px; font-size: 17px; }
+    .error { border-color: #d93025; background: #fce8e6; color: #a50e0e; white-space: pre-wrap; word-break: break-word; }
+    form { display: grid; gap: 10px; }
+    label { font-size: 13px; color: #5f6368; display: grid; gap: 4px; }
+    input[type=text], textarea { font: inherit; padding: 8px 10px; border: 1px solid #c4c7cc; border-radius: 6px; width: 100%; }
+    textarea { min-height: 72px; resize: vertical; }
+    button { justify-self: start; font: inherit; padding: 8px 18px; border: 0; border-radius: 6px; color: #fff; background: var(--accent); cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #eceff1; vertical-align: top; }
+    th { color: #5f6368; font-weight: 600; font-size: 12px; }
+    td.id { color: #5f6368; width: 4em; font-family: ui-monospace, monospace; }
+    td.when { white-space: nowrap; color: #5f6368; font-size: 13px; }
+    td.body { white-space: pre-wrap; word-break: break-word; }
+    .empty { color: #5f6368; font-size: 14px; }
+    footer { color: #80868b; font-size: 12px; text-align: center; margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <header class="banner">
+    <div class="kicker">接続先データベース</div>
+    <h1>{{ targets[target].label }}</h1>
+    <div class="detail">{{ targets[target].detail }}</div>
+    <div class="meta">
+      <span>host={{ db.host }}:{{ db.port }}</span>
+      <span>db={{ db.dbname }}</span>
+      <span>user={{ db.user }}</span>
+      <span>sslmode={{ db.sslmode }}</span>
+      {% if info %}
+        <span>{{ info.version }}</span>
+        {% if info.ssl %}<span class="badge">SSL</span>{% endif %}
+        {% if info.alloydb_detected %}
+          <span class="badge">alloydb.* パラメータあり = AlloyDB</span>
+        {% else %}
+          <span class="badge">alloydb.* パラメータなし = 素の PostgreSQL</span>
+        {% endif %}
+        {% if (target == 'alloydb') != info.alloydb_detected %}
+          <span class="badge warn">設定 (DB_TARGET) と実際の接続先が食い違っています</span>
+        {% endif %}
+      {% else %}
+        <span class="badge warn">未接続</span>
+      {% endif %}
+    </div>
+  </header>
+
+  <main>
+    {% if error %}
+      <div class="card error">{{ error }}</div>
+    {% endif %}
+
+    <section class="card">
+      <h2>レコードを作成</h2>
+      <form method="post" action="{{ url_for('create_note') }}">
+        <label>タイトル
+          <input type="text" name="title" maxlength="200" required autofocus>
+        </label>
+        <label>本文
+          <textarea name="body" maxlength="2000"></textarea>
+        </label>
+        <button type="submit">{{ targets[target].label }} に保存</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>レコード一覧 <small style="font-weight:normal;color:#5f6368">(notes テーブル、新しい順に最大 100 件)</small></h2>
+      {% if notes %}
+        <table>
+          <thead><tr><th>ID</th><th>タイトル</th><th>本文</th><th>作成日時</th></tr></thead>
+          <tbody>
+          {% for n in notes %}
+            <tr>
+              <td class="id">{{ n.id }}</td>
+              <td>{{ n.title }}</td>
+              <td class="body">{{ n.body }}</td>
+              <td class="when">{{ n.created_at.strftime('%Y-%m-%d %H:%M:%S %Z') }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      {% elif not error %}
+        <p class="empty">まだレコードがありません。上のフォームから作成してください。</p>
+      {% endif %}
+    </section>
+
+    <footer>
+      pod: {{ hostname }}
+      {% if info and info.server_addr %} / server: {{ info.server_addr }}{% endif %}
+      {% if info %} / {{ info.version_full }}{% endif %}
+    </footer>
+  </main>
+</body>
+</html>

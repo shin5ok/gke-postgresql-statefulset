@@ -50,9 +50,24 @@ kc() {
   kubectl --context "${CFG_KUBE_CONTEXT}" "$@"
 }
 
-# context が kubeconfig に登録されているか
+# context が kubeconfig に登録されているか。
+# `kubectl ... | grep -q` にすると、grep が一致した時点で終了して kubectl が SIGPIPE で
+# 落ち、pipefail のせいで「無い」と誤判定することがあるため、出力を受けてから照合する。
 kube_context_exists() {
-  kubectl config get-contexts -o name 2>/dev/null | grep -qx "${CFG_KUBE_CONTEXT}"
+  local contexts
+  contexts="$(kubectl config get-contexts -o name 2>/dev/null || true)"
+  grep -qx "${CFG_KUBE_CONTEXT}" <<<"${contexts}"
+}
+
+# StatefulSet がこのクラスタにデプロイ済みか確認し、無ければ案内して終了する。
+# (make alloydb / make app は GKE クラスタは用意するが StatefulSet はデプロイしないため、
+#  その後に make db-content などを実行すると Namespace ごと存在しないことがある)
+require_db_deployed() {
+  kube_context_exists \
+    || die "context ${CFG_KUBE_CONTEXT} がありません。先に 'make db' を実行してください。"
+  kc -n "${CFG_POSTGRES_NAMESPACE}" get statefulset "${CFG_POSTGRES_NAME}" >/dev/null 2>&1 \
+    || die "StatefulSet ${CFG_POSTGRES_NAMESPACE}/${CFG_POSTGRES_NAME} がクラスタ ${CFG_CLUSTER_NAME} にありません。
+       先に 'make db' で PostgreSQL をデプロイしてください。"
 }
 
 # 文字列を base64 (改行なし) にする。引数ではなく環境変数で渡して
@@ -80,4 +95,31 @@ sys.stdout.write("".join(secrets.choice(alphabet) for _ in range(24)))' > "${fil
     chmod 600 "${file}"
   fi
   cat "${file}"
+}
+
+# ---------------------------------------------------------------------------
+# AlloyDB
+# ---------------------------------------------------------------------------
+
+# PSC エンドポイント (予約した内部 IP) のアドレス。無ければ空。
+alloydb_psc_ip() {
+  gcloud compute addresses describe "${CFG_ALLOYDB_PSC_ENDPOINT}" \
+    --project "${CFG_GCP_PROJECT}" --region "${CFG_ALLOYDB_REGION}" \
+    --format='value(address)' 2>/dev/null || true
+}
+
+# アプリ用ユーザのパスワード (config.toml の値 > .secrets/ の保存値)。無ければ空。
+alloydb_app_password() {
+  if [[ -n "${CFG_ALLOYDB_PASSWORD}" ]]; then
+    printf '%s' "${CFG_ALLOYDB_PASSWORD}"
+  elif [[ -s "${SECRETS_DIR}/alloydb_app_password" ]]; then
+    cat "${SECRETS_DIR}/alloydb_app_password"
+  fi
+}
+
+# postgres ユーザのパスワード (クラスタ作成時に自動生成して保存したもの)。無ければ空。
+alloydb_superuser_password() {
+  if [[ -s "${SECRETS_DIR}/alloydb_superuser_password" ]]; then
+    cat "${SECRETS_DIR}/alloydb_superuser_password"
+  fi
 }

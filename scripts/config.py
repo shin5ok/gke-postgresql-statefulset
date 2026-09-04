@@ -98,8 +98,16 @@ SIZE_RE = re.compile(r"^\d+(\.\d+)?(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$")
 QTY_RE = re.compile(r"^\d+(\.\d+)?m?$")
 
 
+IPV4_RE = re.compile(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$")
+# --cpu-count だけで作れる N2 の vCPU 数
+ALLOYDB_N2_CPUS = (2, 4, 8, 16, 32, 64, 96, 128)
+ALLOYDB_VERSIONS = ("POSTGRES_14", "POSTGRES_15", "POSTGRES_16", "POSTGRES_17",
+                    "POSTGRES_18")
+
+
 def validate(cfg: dict) -> None:
     gcp, cl, pg, ct = cfg["gcp"], cfg["cluster"], cfg["postgres"], cfg["content"]
+    adb, app = cfg["alloydb"], cfg["app"]
 
     if not gcp["project"]:
         die("gcp.project が空で、`gcloud config get-value project` も未設定です。\n"
@@ -178,10 +186,72 @@ def validate(cfg: dict) -> None:
         if value < 0:
             die(f"{label} は 0 以上です (指定値: {value})")
 
+    # ---- [alloydb] ----
+    for label, value in (("alloydb.cluster", adb["cluster"]),
+                         ("alloydb.instance", adb["instance"]),
+                         ("alloydb.psc_endpoint", adb["psc_endpoint"])):
+        if not NAME_RE.match(value):
+            die(f"{label} は英小文字で始まる英数字とハイフンのみ、40 文字以内です "
+                f"(指定値: {value!r})")
+    if adb["database_version"] not in ALLOYDB_VERSIONS:
+        die(f"alloydb.database_version は {' | '.join(ALLOYDB_VERSIONS)} です "
+            f"(指定値: {adb['database_version']!r})")
+    if adb["availability_type"] not in ("ZONAL", "REGIONAL"):
+        die(f"alloydb.availability_type は 'ZONAL' か 'REGIONAL' です "
+            f"(指定値: {adb['availability_type']!r})")
+    if adb["cpu_count"] < 1:
+        die(f"alloydb.cpu_count は 1 以上です (指定値: {adb['cpu_count']})")
+    if not adb["machine_type"] and adb["cpu_count"] not in ALLOYDB_N2_CPUS:
+        die(f"alloydb.machine_type が空のとき alloydb.cpu_count は "
+            f"{'/'.join(map(str, ALLOYDB_N2_CPUS))} のいずれかです "
+            f"(指定値: {adb['cpu_count']})。1 vCPU にするには "
+            "machine_type = \"c4a-highmem-1\" を指定してください (対応リージョンのみ)")
+    if adb["machine_type"]:
+        m = re.search(r"-(\d+)(-lssd)?$", adb["machine_type"])
+        if m and int(m.group(1)) != adb["cpu_count"]:
+            die(f"alloydb.cpu_count ({adb['cpu_count']}) が alloydb.machine_type "
+                f"({adb['machine_type']}) の vCPU 数と一致しません")
+    if adb["database"] == "postgres":
+        die("alloydb.database に 'postgres' は指定できません（管理用 DB のため）")
+    if adb["user"] == "postgres":
+        die("alloydb.user に 'postgres' は指定できません（管理用ユーザのため）")
+    if adb["psc_ip"]:
+        m = IPV4_RE.match(adb["psc_ip"])
+        if not m or any(int(o) > 255 for o in m.groups()):
+            die(f"alloydb.psc_ip は IPv4 アドレスです (指定値: {adb['psc_ip']!r})")
+
+    # ---- [app] ----
+    if app["target"] not in ("postgresql", "alloydb"):
+        die(f"app.target は 'postgresql' か 'alloydb' です (指定値: {app['target']!r})")
+    for label, value in (("app.namespace", app["namespace"]),
+                         ("app.name", app["name"])):
+        if not NAME_RE.match(value):
+            die(f"{label} は英小文字で始まる英数字とハイフンのみ、40 文字以内です "
+                f"(指定値: {value!r})")
+    if not re.match(r"^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$", app["registry"]):
+        die(f"app.registry は英小文字で始まる英数字とハイフンのみです "
+            f"(指定値: {app['registry']!r})")
+    if app["image_tag"] and not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$", app["image_tag"]):
+        die(f"app.image_tag の書式が不正です (指定値: {app['image_tag']!r})")
+    if app["builder"] not in ("cloudbuild", "docker"):
+        die(f"app.builder は 'cloudbuild' か 'docker' です (指定値: {app['builder']!r})")
+    if app["service_type"] not in ("ClusterIP", "LoadBalancer"):
+        die(f"app.service_type は 'ClusterIP' か 'LoadBalancer' です "
+            f"(指定値: {app['service_type']!r})")
+    if app["replicas"] < 1:
+        die(f"app.replicas は 1 以上です (指定値: {app['replicas']})")
+    if not QTY_RE.match(app["cpu_request"]):
+        die(f"app.cpu_request の書式が不正です (例: 250m / 1) "
+            f"(指定値: {app['cpu_request']!r})")
+    if not SIZE_RE.match(app["memory_request"]):
+        die(f"app.memory_request の書式が不正です (例: 512Mi / 1Gi) "
+            f"(指定値: {app['memory_request']!r})")
+
 
 def derive(cfg: dict) -> dict:
     """他の値から決まる項目を計算する。"""
     gcp, cl, pg = cfg["gcp"], cfg["cluster"], cfg["postgres"]
+    adb, app = cfg["alloydb"], cfg["app"]
     # Autopilot クラスタは常にリージョナルなので location_type は見ない
     zonal = cl["mode"] == "standard" and cl["location_type"] == "zonal"
     location = gcp["zone"] if zonal else gcp["region"]
@@ -217,6 +287,14 @@ def derive(cfg: dict) -> dict:
         "PG_UID": "999",
         "PG_GID": "999",
         "REPO_ROOT": str(ROOT),
+        # ---- AlloyDB ----
+        "ALLOYDB_REGION": adb["region"] or gcp["region"],
+        # ---- サンプルアプリ ----
+        # StatefulSet 側の書き込みエンドポイント (クラスタ内 DNS 名)
+        "APP_DB_HOST_POSTGRESQL": f"{pg['name']}-rw.{pg['namespace']}.svc.cluster.local",
+        # Artifact Registry 上のイメージ名 (タグは build-app.sh が決める)
+        "APP_IMAGE_REPO": (f"{gcp['region']}-docker.pkg.dev/{gcp['project']}/"
+                           f"{app['registry']}/{app['name']}"),
     }
 
 

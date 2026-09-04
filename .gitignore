@@ -7,6 +7,11 @@
 # 自動生成されたパスワードなどの機密情報
 /.secrets/
 
+# サンプルアプリのローカル実行環境 / Python のキャッシュ
+/app/.venv/
+__pycache__/
+*.pyc
+
 # OS / エディタ
 .DS_Store
 *.swp

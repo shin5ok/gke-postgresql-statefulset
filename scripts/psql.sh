@@ -10,8 +10,7 @@ require_cmd kubectl
 readonly NS="${CFG_POSTGRES_NAMESPACE}"
 readonly POD="${POD_OVERRIDE:-${CFG_POSTGRES_NAME}-0}"
 
-kube_context_exists \
-  || die "context ${CFG_KUBE_CONTEXT} がありません。先に 'make db' を実行してください。"
+require_db_deployed
 
 # 対話端末があるときだけ TTY を割り当てる (CI などでは -t を付けない)
 tty_flag=()

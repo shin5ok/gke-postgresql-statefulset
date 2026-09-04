@@ -1,0 +1,4 @@
+# gcloud builds submit がアップロードしないファイル
+.venv/
+__pycache__/
+*.pyc

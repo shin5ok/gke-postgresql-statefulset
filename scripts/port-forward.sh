@@ -9,8 +9,7 @@ readonly NS="${CFG_POSTGRES_NAMESPACE}"
 readonly NAME="${CFG_POSTGRES_NAME}"
 readonly LOCAL_PORT="${LOCAL_PORT:-15432}"
 
-kube_context_exists \
-  || die "context ${CFG_KUBE_CONTEXT} がありません。先に 'make db' を実行してください。"
+require_db_deployed
 
 password="$(kc -n "${NS}" get secret "${NAME}" \
   -o jsonpath='{.data.APP_PASSWORD}' 2>/dev/null | base64 -d 2>/dev/null || true)"
@@ -27,4 +26,5 @@ cat <<INFO
 
 INFO
 
-exec kc -n "${NS}" port-forward "svc/${NAME}-rw" "${LOCAL_PORT}:5432"
+# kc はシェル関数なので exec できない。kubectl を直接 exec する。
+exec kubectl --context "${CFG_KUBE_CONTEXT}" -n "${NS}" port-forward "svc/${NAME}-rw" "${LOCAL_PORT}:5432"

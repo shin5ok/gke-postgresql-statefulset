@@ -155,3 +155,80 @@ rows_orders = 8000
 
 # 乱数シード（同じ値なら毎回同じダミーデータが生成されます）
 seed = 20260901
+
+
+# -----------------------------------------------------------------------------
+# [alloydb] AlloyDB クラスタ (最小構成) と Private Service Connect
+#           `make alloydb` で作成します。PSC エンドポイントは GKE クラスタと同じ
+#           VPC に作るので、GKE 上の Pod から内部 IP で到達できます。
+# -----------------------------------------------------------------------------
+[alloydb]
+cluster = "alloydb"
+instance = "alloydb-primary"
+
+# 空なら gcp.region。PSC エンドポイント (予約 IP と転送ルール) もこのリージョンに作られます。
+region = ""
+
+# POSTGRES_14 | POSTGRES_15 | POSTGRES_16 | POSTGRES_17 | POSTGRES_18
+database_version = "POSTGRES_17"
+
+# ---- インスタンスのサイズ (最小構成) ----
+# machine_type が空なら N2 (n2-highmem-<cpu_count>)。cpu_count は 2/4/8/16/32/64/96/128。
+# C4A 対応リージョン (us-central1 など) では machine_type = "c4a-highmem-1" と
+# cpu_count = 1 の組み合わせが最小です (開発・検証用途向け)。
+machine_type = ""
+cpu_count = 2
+
+# "ZONAL" (単一ノード・安価) | "REGIONAL" (HA。スタンバイノードあり)
+availability_type = "ZONAL"
+
+# ---- 初期作成されるデータベースとユーザ (StatefulSet 側と同じ名前にしてあります) ----
+database = "appdb"
+user = "app"
+# 空なら自動生成し .secrets/alloydb_app_password に保存します。
+# (postgres ユーザのパスワードは常に自動生成され .secrets/alloydb_superuser_password に保存されます)
+password = ""
+
+# ---- PSC エンドポイント ----
+# 予約する内部 IP アドレスと転送ルールの名前 (両方に同じ名前を使います)
+psc_endpoint = "alloydb-psc"
+# 空ならサブネットから自動で割り当てます。固定したい場合はサブネット内の IP を指定します。
+psc_ip = ""
+
+# `gcloud alloydb clusters create` / `instances create` にそのまま渡す追加フラグ
+# (上級者向け。空白区切り)
+extra_cluster_args = ""
+extra_instance_args = ""
+
+
+# -----------------------------------------------------------------------------
+# [app] app/ のサンプル Web アプリ (`make app` で GKE にデプロイ)
+# -----------------------------------------------------------------------------
+[app]
+# 接続先。切り替えたら `make app` (または `make app-target T=alloydb`) で再デプロイします。
+#   "postgresql" … この Makefile で作った StatefulSet (postgres-rw Service)
+#   "alloydb"    … PSC エンドポイント経由の AlloyDB
+target = "postgresql"
+
+namespace = "app"
+name = "sample-app"
+replicas = 1
+
+# コンテナイメージのビルド方法
+#   "cloudbuild" … Cloud Build でビルドして Artifact Registry に push (手元に docker 不要)
+#   "docker"     … 手元の docker でビルドして push
+builder = "cloudbuild"
+
+# Artifact Registry の Docker リポジトリ名 (gcp.region に無ければ作成します)
+registry = "gke-postgresql-statefulset"
+
+# イメージのタグ。空なら app/ の内容のハッシュを使い、内容が変わっていなければ
+# ビルドをスキップします。
+image_tag = ""
+
+# "ClusterIP" (make app-port-forward で閲覧) | "LoadBalancer" (外部 IP を付与して公開)
+service_type = "ClusterIP"
+
+# Pod のリソース (Autopilot ではこの要求値が課金対象)
+cpu_request = "250m"
+memory_request = "512Mi"

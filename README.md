@@ -2,12 +2,16 @@
 
 GKE 上に PostgreSQL を **StatefulSet** として、任意のサイズで構築するための Make ベースのツールです。クラスタは既定で **Autopilot** として作成します (`[cluster] mode = "standard"` で Standard クラスタにもできます)。
 
+あわせて、**AlloyDB (最小構成) を Private Service Connect で用意する** ターゲットと、**StatefulSet の PostgreSQL と AlloyDB のどちらにも同じコードで接続できる Python のサンプル Web アプリ** (`app/`) が入っています。接続先は `config.toml` の `[app] target` で切り替えます。
+
 ```console
 $ make db          # クラスタが無ければ作り、PostgreSQL StatefulSet を構築する
 $ make db-content  # スキーマとダミーデータを投入する (pg_dump 形式からロード)
+$ make alloydb     # AlloyDB (最小構成) + PSC エンドポイントを作り、DB とユーザを初期化する
+$ make app         # サンプルアプリを GKE にデプロイする ([app] target の DB に接続)
 ```
 
-サイズ（レプリカ数・ディスク容量・CPU / メモリ、Standard ならノード数とマシンタイプ）とロケーションは、すべて **`config.toml`** で指定します。
+サイズ（レプリカ数・ディスク容量・CPU / メモリ、Standard ならノード数とマシンタイプ）とロケーション、アプリの接続先は、すべて **`config.toml`** で指定します。
 
 ---
 
@@ -19,8 +23,11 @@ $ make db-content  # スキーマとダミーデータを投入する (pg_dump �
 | `kubectl` | `gcloud components install kubectl` |
 | `python3` | 3.11 以上 (`tomllib` を使用) |
 | `make` | GNU Make |
+| `docker` (任意) | `[app] builder = "docker"` にしてイメージを手元でビルドする場合のみ。既定は Cloud Build |
 
 課金が有効な Google Cloud プロジェクトが必要です。プロジェクトは `config.toml` の `[gcp] project` で指定するか、未指定なら `gcloud config get-value project` の値が使われます。
+
+AlloyDB とサンプルアプリまで使う場合、実行するアカウントには GKE に加えて次の権限が必要です: AlloyDB 管理者 (`roles/alloydb.admin`)、Compute ネットワーク管理者 (`roles/compute.networkAdmin`: PSC エンドポイント用の予約 IP と転送ルール)、Artifact Registry 管理者と Cloud Build 編集者 (イメージのビルド)。プロジェクトのオーナー / 編集者であればすべて含まれます。
 
 ---
 
@@ -32,7 +39,17 @@ $ vi config.toml       # サイズやゾーンを調整する
 $ make db              # クラスタ作成 (5〜10 分) + StatefulSet デプロイ
 $ make db-content      # スキーマ + ダミーデータを投入
 $ make psql            # psql で中身を確認する
+
+$ make app             # サンプルアプリをビルドしてデプロイ (既定は StatefulSet に接続)
+$ make app-port-forward   # http://localhost:8080/ で開く
+
+$ make alloydb         # AlloyDB + PSC エンドポイントを作成 (10〜15 分)
+$ make alloydb-content # AlloyDB にも同じスキーマ + ダミーデータを投入
+$ make app-target T=alloydb      # アプリの接続先を AlloyDB に切り替えて再デプロイ
+$ make app-target T=postgresql   # StatefulSet に戻す
 ```
+
+`make alloydb` と `make app` も GKE クラスタが無ければ作りますが、StatefulSet の PostgreSQL は `make db` でデプロイするまで存在しません。`make db-content` / `make psql` / `make app` (`target = "postgresql"`) はその後に実行してください。
 
 `make db` はクラスタの有無を確認し、**存在しなければ `config.toml` の設定で自動作成**します。既にある場合は `[cluster]` の設定と実際のクラスタを比較し、差分があれば追従します (Autopilot で追従するのはリリースチャンネルのみ。Standard ではノード数の増減・オートスケール・リリースチャンネルを無停止で反映し、マシンタイプなどノードを作り直す変更は確認を求めます)。何度実行しても安全です。
 
@@ -43,7 +60,7 @@ $ make psql            # psql で中身を確認する
 | ノード | GKE が Pod の要求に応じて自動で用意する | `machine_type` / `num_nodes` などで自分で指定する |
 | ロケーション | 常にリージョナル (`[gcp] region`) | `location_type` で zonal / regional を選ぶ |
 | 課金 | Pod が要求した CPU・メモリ・ストレージ | ノード (VM) 単位 |
-| `spot = true` | PostgreSQL の Pod を Spot Pod として起動する | ノードプールを Spot VM で作成する |
+| `spot = true` | PostgreSQL とサンプルアプリの Pod を Spot Pod として起動する | ノードプールを Spot VM で作成する |
 | 使われない設定 | `location_type` / `machine_type` / `num_nodes` / `disk_type` / `disk_size_gb` / `autoscaling` / `image_type` / `workload_identity` | — |
 
 Autopilot では Workload Identity・Shielded Nodes・ノードの自動修復 / 自動アップグレードが常に有効で、`release_channel` に `None` は指定できません。
@@ -74,6 +91,13 @@ storage_size   = "20Gi"
 cpu_limit      = "2"
 memory_limit   = "4Gi"
 shared_buffers = "256MB"
+
+[alloydb]                       # AlloyDB (最小構成)
+cpu_count         = 2           # N2 2 vCPU / 16 GB (最小)
+availability_type = "ZONAL"     # 単一ノード
+
+[app]                           # サンプルアプリ
+target = "postgresql"           # "alloydb" にすると AlloyDB に接続する
 ```
 
 主な設定項目:
@@ -98,8 +122,21 @@ shared_buffers = "256MB"
 | | `database` / `user` / `password` | `appdb` / `app` / *(自動生成)* | 初期作成される DB とユーザ |
 | | `shared_buffers` ほか | `256MB` | `postgresql.conf` のチューニング |
 | | `internal_lb` | `false` | 同一 VPC 向けの内部 LoadBalancer |
-| `[content]` | `dump_file` | `sql/dump.sql` | `make db-content` が読むファイル |
+| `[content]` | `dump_file` | `sql/dump.sql` | `make db-content` / `make alloydb-content` が読むファイル |
 | | `rows_customers` / `rows_products` / `rows_orders` | `2000` / `500` / `8000` | ダミーデータの行数 |
+| `[alloydb]` | `cluster` / `instance` | `alloydb` / `alloydb-primary` | クラスタ名 / プライマリインスタンス名 |
+| | `region` | *(`[gcp] region`)* | 配置先。PSC エンドポイントも同じリージョンに作られる |
+| | `database_version` | `POSTGRES_17` | `POSTGRES_14` 〜 `POSTGRES_18` |
+| | `machine_type` / `cpu_count` | *(空)* / `2` | 空なら N2 (`n2-highmem-<cpu_count>`、最小 2 vCPU / 16 GB)。C4A 対応リージョンでは `c4a-highmem-1` + `1` が最小 |
+| | `availability_type` | `ZONAL` | `ZONAL` (単一ノード) / `REGIONAL` (HA) |
+| | `database` / `user` / `password` | `appdb` / `app` / *(自動生成)* | 初期作成される DB とユーザ (StatefulSet と同じ名前) |
+| | `psc_endpoint` / `psc_ip` | `alloydb-psc` / *(自動割り当て)* | PSC エンドポイント (予約 IP と転送ルール) の名前と IP |
+| `[app]` | `target` | `postgresql` | **接続先**: `postgresql` (StatefulSet) / `alloydb` |
+| | `namespace` / `name` / `replicas` | `app` / `sample-app` / `1` | Namespace・Deployment 名・Pod 数 |
+| | `builder` | `cloudbuild` | イメージのビルド方法: `cloudbuild` / `docker` |
+| | `registry` / `image_tag` | `gke-postgresql-statefulset` / *(内容のハッシュ)* | Artifact Registry のリポジトリ名とタグ |
+| | `service_type` | `ClusterIP` | `ClusterIP` (port-forward で閲覧) / `LoadBalancer` (外部 IP を付与) |
+| | `cpu_request` / `memory_request` | `250m` / `512Mi` | Pod のリソース |
 
 ※ の付いた項目は `mode = "standard"` のときだけ使われます。
 
@@ -107,17 +144,18 @@ shared_buffers = "256MB"
 
 ```console
 $ make show-config     # 解決後の値をすべて表示
-$ make validate        # 設定・マニフェスト・スクリプトをクラスタ無しで検証
+$ make validate        # 設定・マニフェスト・スクリプト・アプリをクラスタ無しで検証
 ```
 
 ### 環境変数による一時的な上書き
 
-`config.toml` を書き換えずに、その場限りでサイズを変えられます。
+`config.toml` を書き換えずに、その場限りで値を変えられます。
 
 ```console
 $ CFG_POSTGRES_REPLICAS=3 CFG_POSTGRES_MEMORY_LIMIT=8Gi make db
 $ CFG_POSTGRES_STORAGE_SIZE=200Gi make db
 $ CFG_CLUSTER_MODE=standard CFG_CLUSTER_NUM_NODES=5 make db
+$ CFG_APP_TARGET=alloydb make app        # config.toml を変えずに AlloyDB へデプロイ
 ```
 
 ---
@@ -127,6 +165,9 @@ $ CFG_CLUSTER_MODE=standard CFG_CLUSTER_NUM_NODES=5 make db
 ```mermaid
 flowchart TB
     subgraph GKE["GKE クラスタ (Autopilot / Standard)"]
+        subgraph NSAPP["Namespace: app"]
+            APP["Deployment: sample-app<br/>(app/ の Flask アプリ)"]
+        end
         subgraph NS["Namespace: database"]
             SVC_RW["Service: postgres-rw<br/>(書き込み → ordinal 0)"]
             SVC_RO["Service: postgres-ro<br/>(読み取り → 全 Pod)"]
@@ -144,6 +185,15 @@ flowchart TB
             POD0 -.-> POD2
         end
     end
+    subgraph VPC["VPC (GKE と同じネットワーク)"]
+        PSC["PSC エンドポイント<br/>(予約した内部 IP + 転送ルール)"]
+    end
+    subgraph ADB["AlloyDB (Google 管理)"]
+        INST["クラスタ alloydb<br/>プライマリインスタンス (最小構成)"]
+    end
+    APP -- "target = postgresql" --> SVC_RW
+    APP -- "target = alloydb" --> PSC
+    PSC -- "Service Attachment" --> INST
 ```
 
 * **`replicas = 1`** … 単体構成。`postgres-0` のみが作られます。
@@ -165,7 +215,7 @@ flowchart TB
 
 ## `make db-content` — スキーマとダミーデータ
 
-`sql/dump.sql` (pg_dump のプレーン形式) を psql で流し込みます。`--clean --if-exists` 相当の `DROP` から始まるので、**何度実行しても同じ状態になります**。
+`sql/dump.sql` (pg_dump のプレーン形式) を psql で流し込みます。`--clean --if-exists` 相当の `DROP` から始まるので、**何度実行しても同じ状態になります**。AlloyDB には `make alloydb-content` で同じファイルを投入できます。
 
 投入されるのは EC サイト風の 5 テーブルです。
 
@@ -192,6 +242,84 @@ $ make db-dump
 
 ---
 
+## サンプルアプリ (`app/`)
+
+Flask + psycopg 3 の最小の Web アプリです。`notes` テーブル (初回アクセス時に無ければ作成) の **一覧と作成** だけを行い、画面上部のバナーに **AlloyDB / PostgreSQL のどちらに接続しているか** を大きく表示します。バナーには設定上の接続先に加えて、接続先サーバの `pg_settings` に `alloydb.*` パラメータがあるかどうかで判定した「実際の接続先」も出るので、設定と実体が食い違っていればその場で分かります。
+
+```console
+$ make app                 # イメージをビルド (必要なときだけ) して GKE にデプロイ
+$ make app-port-forward    # http://localhost:8080/ で開く
+$ make app-status          # Pod / Service とアクセス方法
+$ make app-logs            # ログを追う
+```
+
+### 接続先の切り替え
+
+`config.toml` の `[app] target` を `"postgresql"` または `"alloydb"` にして `make app` を実行するだけです。`make app-target T=alloydb` は `config.toml` を書き換えてから `make app` するショートカットです。
+
+| `target` | 接続先 | パスワード | `sslmode` |
+| --- | --- | --- | --- |
+| `postgresql` | `postgres-rw.<namespace>.svc.cluster.local:5432` (StatefulSet のプライマリ) | クラスタ上の Secret `postgres` の `APP_PASSWORD` | `prefer` |
+| `alloydb` | PSC エンドポイントの内部 IP `:5432` | `.secrets/alloydb_app_password` (または `[alloydb] password`) | `require` (AlloyDB は SSL 必須) |
+
+アプリ自身は **環境変数しか見ません** (`DB_TARGET` / `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` / `DB_SSLMODE`)。`make app` (`scripts/deploy-app.sh`) が `config.toml` からこれらを解決し、ConfigMap `sample-app-config` と Secret `sample-app-db` に入れて Pod に渡します。接続先が変わると Deployment のアノテーション (チェックサム) が変わり、Pod がローリング更新されます。
+
+### イメージのビルド
+
+`make app-image` (`make app` からも呼ばれます) は `app/` の内容のハッシュをタグにして Artifact Registry (`<region>-docker.pkg.dev/<project>/gke-postgresql-statefulset/sample-app`) に push します。同じタグのイメージが既にあればビルドしません (`FORCE_BUILD=1 make app-image` で強制)。リポジトリと API (Artifact Registry / Cloud Build) は無ければ有効化・作成します。
+
+* `[app] builder = "cloudbuild"` (既定) … `gcloud builds submit`。手元に docker は不要です。
+* `[app] builder = "docker"` … `docker build --platform linux/amd64` して push。`gcloud auth configure-docker` は自動で行います。
+
+### 公開方法
+
+既定 (`service_type = "ClusterIP"`) では `make app-port-forward` で手元から見ます。`service_type = "LoadBalancer"` にすると外部 IP が付き、`make app-status` に URL が出ます (誰でも書き込める画面なので検証用途に限ってください)。
+
+### 手元で動かす
+
+```console
+$ make port-forward     # 別ターミナルで (target = "postgresql" のとき)
+$ make app-dev          # app/.venv を作って http://localhost:8080/ で起動
+```
+
+`target = "alloydb"` のときは PSC エンドポイントの IP に直接接続しようとしますが、この IP は VPC 内からしか到達できないため、VPN などが無い手元の PC からは繋がりません。AlloyDB の確認は `make app` で GKE 上に起動して行ってください。
+
+---
+
+## AlloyDB (最小構成) と Private Service Connect
+
+> **`gcloud` コマンドで同じ構成を手動で作る手順書を [doc/alloydb-psc-setup.md](doc/alloydb-psc-setup.md) に用意しています。** 各コマンドが何を作るのか、なぜ必要なのかを 1 つずつ説明しているので、お客様への説明資料や、Makefile を使わない環境での作業手順としてご利用いただけます。
+
+`make alloydb` は次を順に行います。既にあるものは飛ばすので、何度実行しても安全です。
+
+1. `alloydb.googleapis.com` / `compute.googleapis.com` を有効化する
+2. AlloyDB クラスタを **Private Service Connect (PSC) 有効** で作成する (`gcloud alloydb clusters create --enable-private-service-connect`)。`postgres` ユーザのパスワードは自動生成して `.secrets/alloydb_superuser_password` に保存する
+3. プライマリインスタンスを作成する (`--allowed-psc-projects` に自プロジェクト。既定は N2 2 vCPU / 16 GB の `ZONAL` = 単一ノード)
+4. **GKE クラスタと同じ VPC** に PSC エンドポイントを作る: 内部 IP を予約 (`gcloud compute addresses create`) → インスタンスのサービスアタッチメントへの転送ルールを作成 (`gcloud compute forwarding-rules create --target-service-attachment ... --allow-psc-global-access`) → 接続状態が `ACCEPTED` になるのを待つ
+5. GKE 上の一時 Pod (postgres イメージ) から psql で接続し、アプリ用ロール `app` とデータベース `appdb` を作成し、`public` スキーマの所有者を `app` にする (AlloyDB では `public` が `alloydbsuperuser` 所有のため、データベースの所有者にしただけではテーブルを作れない)
+
+PSC を使うので、private services access (VPC ピアリングと IP 範囲の割り当て) は不要です。エンドポイントの IP は VPC 内からしか到達できないため、psql やダミーデータの投入も GKE 上の一時 Pod を経由します。一時 Pod は `[app] namespace` に作られ、コマンドの終了時に削除されます (消し忘れても 1 時間で終了します)。
+
+```console
+$ make alloydb            # 作成 (10〜15 分)
+$ make alloydb-content    # sql/dump.sql を AlloyDB に投入
+$ make alloydb-psql       # psql を開く   例: make alloydb-psql ARGS='-c "SELECT count(*) FROM orders;"'
+$ SUPERUSER=1 make alloydb-psql   # postgres ユーザで開く
+$ make alloydb-status     # クラスタ / インスタンス / PSC エンドポイントの状態と接続情報
+$ make destroy-alloydb    # 転送ルール → クラスタ (インスタンスごと) → 予約 IP の順に削除
+```
+
+接続は IP 直接 + `sslmode=require` です (AlloyDB のインスタンスは既定で SSL 必須。CA 検証は行いません)。AlloyDB が発行する DNS 名 (`*.alloydb-psc.goog`) は言語コネクタや Auth Proxy 向けのもので、本ツールでは使いません。
+
+### サイズとコスト
+
+* 既定の `cpu_count = 2` / `availability_type = "ZONAL"` は AlloyDB で作れる中で最小の N2 構成です。**アクセスが無くてもインスタンスが起動している限り課金されます**。使い終わったら `make destroy-alloydb` してください。しばらく使わないだけなら停止もできます (`gcloud alloydb instances update <instance> --cluster <cluster> --region <region> --activation-policy NEVER`。停止中は vCPU / メモリの課金が止まり、ストレージとバックアップの課金は継続します)。
+* C4A に対応したリージョン (`asia-east1`, `asia-southeast1`, `us-central1`, `us-east1`, `us-east4`, `europe-west1` 〜 `europe-west4`) では `machine_type = "c4a-highmem-1"` と `cpu_count = 1` の組み合わせで 1 vCPU / 8 GB の検証用シェイプが使えます。`asia-northeast1` では使えません。
+* 既存インスタンスのサイズは `make alloydb` では変更しません。`gcloud alloydb instances update --cpu-count ...` で変更してください。
+* `region` を GKE と別にすることもできます (PSC のグローバルアクセスで到達できます) が、その場合は GKE の VPC にそのリージョンのサブネットが必要です。auto モードの `default` VPC なら全リージョンにあります。
+
+---
+
 ## Make ターゲット
 
 | ターゲット | 説明 |
@@ -206,9 +334,22 @@ $ make db-dump
 | `make scale N=3` | レプリカ数を変えて再デプロイする (`config.toml` に保存) |
 | `make gen-dump` | ダミーデータを再生成する |
 | `make db-dump` | 稼働中の DB から `pg_dump` を取得する |
+| `make alloydb` | **AlloyDB + PSC エンドポイントを作成し、DB とユーザを初期化** |
+| `make alloydb-content` | スキーマとダミーデータを AlloyDB に投入 |
+| `make alloydb-psql` | AlloyDB に psql を開く (GKE 上の一時 Pod 経由。`SUPERUSER=1` で postgres ユーザ) |
+| `make alloydb-status` | AlloyDB と PSC エンドポイントの状態・接続情報を表示 |
+| `make app` | **サンプルアプリをビルド (必要なら) してデプロイ** |
+| `make app-image` | イメージをビルドして Artifact Registry に push (`FORCE_BUILD=1` で強制) |
+| `make app-target T=alloydb` | 接続先を `config.toml` に書き込んで再デプロイ (`T=postgresql` で戻す) |
+| `make app-status` | アプリの Pod / Service とアクセス方法を表示 |
+| `make app-port-forward` | `localhost:8080` をアプリに転送する |
+| `make app-logs` | アプリのログを追う |
+| `make app-dev` | 手元でアプリを起動する (`app/.venv`) |
 | `make render` | マニフェストを `build/` に生成するだけ (適用しない) |
-| `make validate` | 設定・マニフェスト・スクリプトをオフラインで検証する |
+| `make validate` | 設定・マニフェスト・スクリプト・アプリをオフラインで検証する |
 | `make show-config` | 解決後の設定値を表示する |
+| `make destroy-app` | サンプルアプリを Namespace ごと削除する |
+| `make destroy-alloydb` | AlloyDB クラスタ (インスタンス含む) と PSC エンドポイントを削除する |
 | `make destroy-db` | Namespace ごと DB を削除する (クラスタは残す) |
 | `make destroy-cluster` | GKE クラスタごと削除する |
 
@@ -226,6 +367,8 @@ $ make db-dump
 | マシンタイプ / ノードのディスク ※ | `[cluster] machine_type` などを変更 → `make db`。**ノードのローリング置換**が走るため確認を求められます。PVC は保持されますが、ノードが少ない構成では DB が一時停止します。 |
 | Spot VM / イメージタイプ / GKE バージョン ※ | 既存クラスタには自動適用しません。差分があると `make db` が手順を表示します。 |
 | クラスタの種類 (`mode`) | 既存クラスタは変換できません。`make destroy-cluster` → `make db` で作り直してください。 |
+| アプリの接続先 | `[app] target` を変更 → `make app` (または `make app-target T=...`)。Pod がローリング更新されます。 |
+| AlloyDB のサイズ | 既存インスタンスには自動適用しません。`gcloud alloydb instances update --cpu-count ...` で変更してください。 |
 
 ※ は `mode = "standard"` のときだけの操作です。Autopilot ではノードのサイズ調整そのものが不要です。
 
@@ -239,8 +382,15 @@ $ make db-dump
 Makefile                        エントリポイント
 config.toml.template            設定のひな形 兼 デフォルト値の定義
 config.toml                     実際の設定 (gitignore)
+doc/
+  alloydb-psc-setup.md          AlloyDB + PSC を gcloud で構築する手順書 (お客様向けの説明つき)
+app/
+  main.py                       サンプル Web アプリ (Flask + psycopg 3)。接続先は環境変数だけで決まる
+  templates/index.html          画面 (上部に AlloyDB / PostgreSQL のバナー)
+  requirements.txt / Dockerfile コンテナイメージの定義
 manifests/
-  *.yaml.tmpl                   ${CFG_*} を埋め込む Kubernetes マニフェスト
+  *.yaml.tmpl                   ${CFG_*} を埋め込む Kubernetes マニフェスト (PostgreSQL)
+  app/*.yaml.tmpl               サンプルアプリの Namespace / Secret / ConfigMap / Deployment / Service
   pg-scripts/
     init-01-app-user.sh         初回 initdb 時にアプリ用 / レプリケーション用ロールを作る
     bootstrap-replica.sh        initContainer: スタンバイを pg_basebackup で作る
@@ -255,6 +405,14 @@ scripts/
   deploy-db.sh                  レンダリング → apply → 起動待ち
   load-content.sh               dump.sql の投入
   gen-dump.py                   ダミーデータ生成
+  ensure-alloydb.sh             AlloyDB クラスタ / インスタンス / PSC エンドポイントの作成と DB 初期化
+  alloydb-lib.sh                GKE 上の一時 Pod 経由で AlloyDB に psql する共通処理
+  alloydb-content.sh / alloydb-psql.sh / alloydb-status.sh
+  app-lib.sh                    アプリの接続先 (target) とイメージ名の解決
+  app-tag.py                    app/ の内容からイメージタグ (ハッシュ) を決める
+  build-app.sh                  イメージのビルドと push (Cloud Build / docker)
+  deploy-app.sh                 アプリのレンダリング → apply → 起動待ち
+  app-status.sh / app-port-forward.sh / app-dev.sh
   dump-db.sh / psql.sh / status.sh / port-forward.sh / destroy.sh / validate.sh
 sql/dump.sql                    スキーマ + ダミーデータ (pg_dump 形式)
 build/                          レンダリング結果 (gitignore)
@@ -317,13 +475,46 @@ $ kubectl -n database delete pod postgres-0
 
 そもそも拡張が始まらない場合は、StorageClass の `allowVolumeExpansion` が `true` である必要があります (GKE の `standard-rwo` / `premium-rwo` は既定で有効)。
 
+**`make app-image` (Cloud Build) が権限エラーで失敗する**
+
+Cloud Build が使うサービスアカウント (新しいプロジェクトでは Compute Engine の既定サービスアカウント) に `roles/artifactregistry.writer` と `roles/logging.logWriter` を付与してください。手元に docker があるなら `[app] builder = "docker"` にすると Cloud Build を使わずに済みます。
+
+**アプリの Pod が `ImagePullBackOff`**
+
+GKE ノードのサービスアカウントに `roles/artifactregistry.reader` が必要です (既定の Compute Engine サービスアカウントを使っていて、既定の権限付与を無効にしていなければ通常は問題ありません)。
+
+**アプリのバナーに「未接続」と出る**
+
+画面のエラー欄に psycopg のエラーがそのまま出ます。`target = "postgresql"` なら `make status` で StatefulSet が Ready か、`target = "alloydb"` なら `make alloydb-status` で PSC 接続が `ACCEPTED` かを確認してください。`make app-logs` でもログを追えます。
+
+**PSC 接続が `ACCEPTED` にならない / 一時 Pod から AlloyDB に繋がらない**
+
+```console
+$ make alloydb-status
+```
+
+`PSC_STATUS` が `PENDING` や `REJECTED` の場合は、インスタンスの `allowed-psc-projects` に自プロジェクトが含まれているか確認してください (`make alloydb` は作成時に自プロジェクトを指定しますが、既存インスタンスには追加しません)。
+
+```console
+$ gcloud alloydb instances update alloydb-primary --cluster alloydb --region asia-northeast1 \
+    --allowed-psc-projects <PROJECT_ID>
+```
+
+一時 Pod が `Pending` のままなら Autopilot がノードを用意している最中です (1〜2 分)。
+
+**`make alloydb` が「PSC が有効ではありません」で止まる**
+
+同じ名前の AlloyDB クラスタが private services access で作られています。`[alloydb] cluster` を別の名前にするか、そのクラスタを削除してから再実行してください。
+
 ---
 
 ## 片付け
 
 ```console
+$ make destroy-app       # サンプルアプリだけ削除 (DB は残す)
+$ make destroy-alloydb   # AlloyDB クラスタ (インスタンス含む) と PSC エンドポイントを削除
 $ make destroy-db        # DB だけ削除 (クラスタは残す)
 $ make destroy-cluster   # クラスタごと削除
 ```
 
-どちらも確認のためリソース名の入力を求めます。非対話環境では `ASSUME_YES=1` を付けてください。
+いずれも確認のためリソース名の入力を求めます。非対話環境では `ASSUME_YES=1` を付けてください。AlloyDB のインスタンスはアクセスが無くても起動している限り課金されるので、検証が終わったら忘れずに削除してください。

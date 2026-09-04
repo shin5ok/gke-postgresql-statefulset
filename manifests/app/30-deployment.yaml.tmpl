@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${CFG_APP_NAME}
+  namespace: ${CFG_APP_NAMESPACE}
+  labels:
+    app: ${CFG_APP_NAME}
+    app.kubernetes.io/name: sample-app
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+spec:
+  replicas: ${CFG_APP_REPLICAS}
+  selector:
+    matchLabels:
+      app: ${CFG_APP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${CFG_APP_NAME}
+        app.kubernetes.io/name: sample-app
+        # 接続先を見分けやすいようラベルにも入れておく
+        gke-postgresql-statefulset/db-target: ${CFG_APP_TARGET}
+      annotations:
+        # 接続先 (ConfigMap / Secret) が変わったら Pod を作り直すためのチェックサム
+        gke-postgresql-statefulset/config-checksum: "${CFG_APP_CONFIG_CHECKSUM}"
+    spec:
+      terminationGracePeriodSeconds: ${CFG_POD_TERMINATION_GRACE}
+      # cluster.spot = true (Autopilot) なら DB と同様に Spot Pod で動かす
+      nodeSelector: ${CFG_POD_NODE_SELECTOR_JSON}
+      tolerations: ${CFG_POD_TOLERATIONS_JSON}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: app
+          image: ${CFG_APP_IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: ${CFG_APP_NAME}-config
+            - secretRef:
+                name: ${CFG_APP_NAME}-db
+          resources:
+            requests:
+              cpu: "${CFG_APP_CPU_REQUEST}"
+              memory: "${CFG_APP_MEMORY_REQUEST}"
+            limits:
+              cpu: "${CFG_APP_CPU_REQUEST}"
+              memory: "${CFG_APP_MEMORY_REQUEST}"
+          # DB が落ちていても画面でエラーを表示したいので、プローブは DB を見ない
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3

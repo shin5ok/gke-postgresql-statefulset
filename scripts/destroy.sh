@@ -2,6 +2,8 @@
 # 作成したリソースを削除する。
 #   destroy.sh db       … StatefulSet / PVC / Namespace を削除 (クラスタは残す)
 #   destroy.sh cluster  … GKE クラスタごと削除
+#   destroy.sh alloydb  … AlloyDB クラスタ (インスタンス含む) と PSC エンドポイントを削除
+#   destroy.sh app      … サンプルアプリの Namespace を削除
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 load_config
@@ -57,7 +59,57 @@ WARN
     ok "クラスタを削除しました"
     ;;
 
+  alloydb)
+    cat <<WARN
+
+  ${C_YELLOW}${C_BOLD}AlloyDB クラスタ ${CFG_ALLOYDB_CLUSTER} (${CFG_ALLOYDB_REGION}) を削除します。${C_RESET}
+  ${C_YELLOW}インスタンス ${CFG_ALLOYDB_INSTANCE} とその中のデータ、PSC エンドポイント ${CFG_ALLOYDB_PSC_ENDPOINT} も削除されます。${C_RESET}
+  GKE クラスタと StatefulSet には影響しません。
+
+WARN
+    confirm "本当に削除しますか?" "${CFG_ALLOYDB_CLUSTER}"
+    # 転送ルール -> クラスタ (--force でインスタンスごと) -> 予約 IP の順に消す
+    if gcloud compute forwarding-rules describe "${CFG_ALLOYDB_PSC_ENDPOINT}" \
+         --project "${CFG_GCP_PROJECT}" --region "${CFG_ALLOYDB_REGION}" >/dev/null 2>&1; then
+      info "PSC エンドポイント (転送ルール ${CFG_ALLOYDB_PSC_ENDPOINT}) を削除します"
+      gcloud compute forwarding-rules delete "${CFG_ALLOYDB_PSC_ENDPOINT}" \
+        --project "${CFG_GCP_PROJECT}" --region "${CFG_ALLOYDB_REGION}" --quiet \
+        || warn "転送ルールの削除に失敗しました"
+    fi
+    if gcloud alloydb clusters describe "${CFG_ALLOYDB_CLUSTER}" \
+         --region "${CFG_ALLOYDB_REGION}" --project "${CFG_GCP_PROJECT}" >/dev/null 2>&1; then
+      info "AlloyDB クラスタ ${CFG_ALLOYDB_CLUSTER} を削除します (数分かかります)"
+      gcloud alloydb clusters delete "${CFG_ALLOYDB_CLUSTER}" \
+        --region "${CFG_ALLOYDB_REGION}" --project "${CFG_GCP_PROJECT}" --force --quiet \
+        || die "クラスタの削除に失敗しました"
+    else
+      warn "クラスタ ${CFG_ALLOYDB_CLUSTER} は存在しません"
+    fi
+    if gcloud compute addresses describe "${CFG_ALLOYDB_PSC_ENDPOINT}" \
+         --project "${CFG_GCP_PROJECT}" --region "${CFG_ALLOYDB_REGION}" >/dev/null 2>&1; then
+      info "予約 IP ${CFG_ALLOYDB_PSC_ENDPOINT} を削除します"
+      gcloud compute addresses delete "${CFG_ALLOYDB_PSC_ENDPOINT}" \
+        --project "${CFG_GCP_PROJECT}" --region "${CFG_ALLOYDB_REGION}" --quiet \
+        || warn "予約 IP の削除に失敗しました"
+    fi
+    ok "削除しました (.secrets/alloydb_* は残ります。不要なら削除してください)"
+    ;;
+
+  app)
+    kube_context_exists || die "context ${CFG_KUBE_CONTEXT} がありません。"
+    cat <<WARN
+
+  ${C_YELLOW}${C_BOLD}Namespace ${CFG_APP_NAMESPACE} (サンプルアプリ) を削除します。${C_RESET}
+  データベース (StatefulSet / AlloyDB) には影響しません。
+
+WARN
+    confirm "本当に削除しますか?" "${CFG_APP_NAMESPACE}"
+    info "Namespace ${CFG_APP_NAMESPACE} を削除します"
+    kc delete namespace "${CFG_APP_NAMESPACE}" --wait=true || warn "削除に失敗、または既に存在しません"
+    ok "削除しました"
+    ;;
+
   *)
-    die "使い方: destroy.sh <db|cluster>"
+    die "使い方: destroy.sh <db|cluster|alloydb|app>"
     ;;
 esac
