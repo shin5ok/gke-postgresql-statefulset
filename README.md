@@ -11,7 +11,7 @@ $ make alloydb     # AlloyDB (最小構成) + PSC エンドポイントを作り
 $ make app         # サンプルアプリを GKE にデプロイする ([app] target の DB に接続)
 ```
 
-サイズ（レプリカ数・ディスク容量・CPU / メモリ、Standard ならノード数とマシンタイプ）とロケーション、アプリの接続先は、すべて **`config.toml`** で指定します。
+サイズ（レプリカ数・ディスク容量・CPU / メモリ、Standard ならノード数とマシンタイプ）とディスクの種別 (Hyperdisk Balanced の IOPS / スループットを含む)、ロケーション、アプリの接続先は、すべて **`config.toml`** で指定します。
 
 ---
 
@@ -61,7 +61,8 @@ $ make app-target T=postgresql   # StatefulSet に戻す
 | ロケーション | 常にリージョナル (`[gcp] region`) | `location_type` で zonal / regional を選ぶ |
 | 課金 | Pod が要求した CPU・メモリ・ストレージ | ノード (VM) 単位 |
 | `spot = true` | PostgreSQL とサンプルアプリの Pod を Spot Pod として起動する | ノードプールを Spot VM で作成する |
-| 使われない設定 | `location_type` / `machine_type` / `num_nodes` / `disk_type` / `disk_size_gb` / `autoscaling` / `image_type` / `workload_identity` | — |
+| `[postgres] compute_class` / `machine_family` | PostgreSQL の Pod を専用ノード (`Performance`) や特定のマシンシリーズ (`n4` など) に配置する | 使われない (ノードは `machine_type` で決まる) |
+| 使われない設定 | `location_type` / `machine_type` / `num_nodes` / `disk_type` / `disk_size_gb` / `autoscaling` / `image_type` / `workload_identity` | `[postgres] compute_class` / `machine_family` |
 
 Autopilot では Workload Identity・Shielded Nodes・ノードの自動修復 / 自動アップグレードが常に有効で、`release_channel` に `None` は指定できません。
 
@@ -88,6 +89,7 @@ num_nodes    = 3                # 同上
 [postgres]                      # PostgreSQL のサイズ
 replicas       = 1              # 2 以上でストリーミングレプリケーション構成
 storage_size   = "20Gi"
+storage_class  = "premium-rwo"  # "hyperdisk-balanced" にすると Hyperdisk Balanced (StorageClass を自動作成)
 cpu_limit      = "2"
 memory_limit   = "4Gi"
 shared_buffers = "256MB"
@@ -113,10 +115,12 @@ target = "postgresql"           # "alloydb" にすると AlloyDB に接続する
 | | `location_type` ※ | `zonal` | `zonal` / `regional` |
 | | `machine_type` ※ | `e2-standard-4` | ノードのマシンタイプ |
 | | `num_nodes` ※ | `3` | ノード数 (regional ならゾーンあたり) |
-| | `disk_type` / `disk_size_gb` ※ | `pd-balanced` / `100` | ノードのブートディスク |
+| | `disk_type` / `disk_size_gb` ※ | `pd-balanced` / `100` | ノードのブートディスク (N4 / C4 系は `hyperdisk-balanced` が必須) |
 | | `autoscaling` / `min_nodes` / `max_nodes` ※ | `false` / `1` / `6` | ノードプールの自動スケール |
 | `[postgres]` | `replicas` | `1` | 1 = 単体、2 以上 = レプリケーション構成 |
-| | `storage_size` / `storage_class` | `20Gi` / `premium-rwo` | PVC のサイズと種別 |
+| | `storage_size` / `storage_class` | `20Gi` / `premium-rwo` | PVC のサイズと StorageClass。`hyperdisk-balanced` にすると Hyperdisk Balanced 用の StorageClass を作って使う ([後述](#hyperdisk-balanced)) |
+| | `hyperdisk_iops` / `hyperdisk_throughput` | `0` / `0` | Hyperdisk Balanced にプロビジョニングする IOPS とスループット (MiB/s)。`0` なら容量から決まる既定値 |
+| | `compute_class` / `machine_family` † | *(空)* / *(空)* | Pod の配置。コンピュートクラス (`Performance` なら Pod ごとに専用ノード) とマシンシリーズ (`n4` / `c3` / `c4` など) |
 | | `cpu_request` / `cpu_limit` | `500m` / `2` | Pod の CPU |
 | | `memory_request` / `memory_limit` | `1Gi` / `4Gi` | Pod のメモリ |
 | | `database` / `user` / `password` | `appdb` / `app` / *(自動生成)* | 初期作成される DB とユーザ |
@@ -139,7 +143,7 @@ target = "postgresql"           # "alloydb" にすると AlloyDB に接続する
 | | `service_type` | `ClusterIP` | `ClusterIP` (port-forward で閲覧) / `LoadBalancer` (外部 IP を付与) |
 | | `cpu_request` / `memory_request` | `250m` / `512Mi` | Pod のリソース |
 
-※ の付いた項目は `mode = "standard"` のときだけ使われます。
+※ の付いた項目は `mode = "standard"`、† の付いた項目は `mode = "autopilot"` のときだけ使われます。
 
 設定値は起動前に型と書式が検証され、未知のキーや不正な値はエラーになります。
 
@@ -147,6 +151,71 @@ target = "postgresql"           # "alloydb" にすると AlloyDB に接続する
 $ make show-config     # 解決後の値をすべて表示
 $ make validate        # 設定・マニフェスト・スクリプト・アプリをクラスタ無しで検証
 ```
+
+### Hyperdisk Balanced
+
+`[postgres] storage_class = "hyperdisk-balanced"` にすると、GKE 標準の StorageClass の代わりに **Hyperdisk Balanced** 用の StorageClass (`manifests/05-storageclass.yaml.tmpl`) を `make db` が作成し、PVC がそれを使います。必要な設定はこれだけです。
+
+```toml
+[postgres]
+storage_class = "hyperdisk-balanced"
+```
+
+`make render` で生成されるマニフェストの該当部分:
+
+```yaml
+# build/05-storageclass.yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: hyperdisk-balanced
+provisioner: pd.csi.storage.gke.io
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters: {"type": "hyperdisk-balanced", "use-allowed-disk-topology": "true"}
+```
+
+```yaml
+# build/40-statefulset.yaml (抜粋)
+spec:
+  volumeClaimTemplates:
+    - spec:
+        storageClassName: hyperdisk-balanced
+        resources:
+          requests:
+            storage: 20Gi
+```
+
+Hyperdisk をアタッチできるのは N4 / C3 / C4 などのマシンシリーズだけですが、StorageClass の `use-allowed-disk-topology` により、この PVC を使う Pod は対応するノードにだけ配置されます。Autopilot ではそのノードが自動で用意されるため、StatefulSet に `nodeSelector` を書く必要はありません (GKE 1.34.1-gke.2541000 以降。`make db` が適用前にクラスタとノードのバージョンを確認します)。
+
+Hyperdisk は容量とは独立に性能を決められるため、`hyperdisk_iops` / `hyperdisk_throughput` で IOPS とスループットをプロビジョニングできます。Autopilot では `compute_class` / `machine_family` で Pod の配置を固定することもできます (いずれも任意)。たとえば **N4 の専用ノード** に PostgreSQL を置くには次のようにします。
+
+```toml
+[postgres]
+storage_size         = "150Gi"
+storage_class        = "hyperdisk-balanced"
+hyperdisk_iops       = 10000          # 3000 〜 min(500 x GiB, 160000)。0 なら容量から決まる既定値
+hyperdisk_throughput = 250            # MiB/s。140 〜 2400 かつ IOPS の 1/256 〜 1/4。0 なら既定値
+compute_class        = "Performance"  # Pod ごとに専用ノードを用意する (Autopilot)
+machine_family       = "n4"           # マシンシリーズを固定する (Autopilot)
+cpu_request    = "2"
+cpu_limit      = "2"
+memory_request = "8Gi"
+memory_limit   = "8Gi"
+```
+
+この場合、StorageClass の `parameters` に `"provisioned-iops-on-create": "10000", "provisioned-throughput-on-create": "250Mi"` が加わり、StatefulSet の `nodeSelector` に `{"cloud.google.com/compute-class": "Performance", "cloud.google.com/machine-family": "n4"}` が入ります。
+
+押さえておくこと:
+
+* **Hyperdisk をアタッチできるノードが必要です。** E2 / N1 / N2 / N2D / T2 系には付けられません。Autopilot では上記のとおり対応ノードに自動で配置されます (`machine_family` はシリーズを固定したいときだけ)。Standard では `[cluster] machine_type` を対応シリーズにし (`make validate` と `make db` が設定の時点でエラーにします)、N4 / C4 系なら `disk_type = "hyperdisk-balanced"` (ブートディスクも Hyperdisk のみ) にします。
+* **`compute_class = "Performance"` は Pod ごとに専用ノードを作ります。** ノード全体のリソースを使えます。`machine_family` だけを指定すると、同じシリーズを要求する他の Pod とノードを共有します。どちらもハードウェアを指定する扱いになるため、課金は Pod の要求値ではなく Compute Engine の VM 単位 (+ Autopilot の管理料) です。どちらも `spot = true` と組み合わせられます。
+* **ノードのサイズは Pod の requests で決まります。** Autopilot は Pod と DaemonSet の requests の合計が収まるマシンタイプを選ぶため、ディスクの性能上限も requests で変わります (N4 は 4 vCPU 以下なら 240 MiB/s)。サイズを固定したいときはカスタム ComputeClass を作り、その名前を `compute_class` に書きます。このとき `machine_family` は空にし、Spot は ComputeClass の `priorities` で指定します。nodeSelector に併記すると GKE が Pod を拒否するため、`spot = true` でも PostgreSQL の Pod には `gke-spot` の nodeSelector を付けません。
+* **IOPS / スループットは追加課金の対象です。** 3000 IOPS と 140 MiB/s を超える分に月額がかかります。`0` (既定値) にすると容量から決まる値 (IOPS = 6 x GiB + 3000、スループット = 1.5 x GiB + 140 MiB/s) になります。
+* **StorageClass の `parameters` は変更できません。** `hyperdisk_iops` などを変えて `make db` すると StorageClass を削除して作り直しますが、作成済みのボリュームは元の値のまま動きます。既存ディスクの性能は `gcloud compute disks update <DISK> --provisioned-iops=... --provisioned-throughput=...` で変更してください。
+* **既存の PVC は移行されません。** `storage_class` を変えても作成済みの PVC は元の StorageClass のままです (StatefulSet は Pod と PVC を残して作り直され、`make db` が該当する PVC を警告します)。Hyperdisk が使われるのは新しく作られる PVC からです。`machine_family` などで N4 系のノードを指定すると、Persistent Disk の PVC を持つ Pod はそのノードにアタッチできず `Pending` になります。既存のデータごと Hyperdisk に切り替えるときは `make destroy-db` → `make db` → `make db-content` で作り直すか、スナップショットからディスクを複製してください。
+
+> 根拠にした公式ドキュメントの記述、N4 のサイズごとの性能上限、カスタム ComputeClass の例は [docs/hyperdisk-balanced-autopilot-n4.md](docs/hyperdisk-balanced-autopilot-n4.md) にまとめています。
 
 ### 環境変数による一時的な上書き
 
@@ -386,6 +455,9 @@ $ POOLED=1 make alloydb-psql                         # プーラー経由で psq
 | レプリカ数 | `[postgres] replicas` を変更 → `make db`。`make scale N=3` は `config.toml` を書き換えてから反映するので、次回以降の `make db` でも維持されます。 |
 | ディスク容量 | `[postgres] storage_size` を **増やして** `make db`。既存 PVC は自動で拡張要求されます。<br/>ファイルシステムの拡張完了に Pod の再起動が必要な場合があります (`FileSystemResizePending`)。<br/>Kubernetes は縮小をサポートしないため、減らす場合は `make destroy-db` からの作り直しが必要です。 |
 | CPU / メモリ | `[postgres] cpu_limit` などを変更 → `make db` (ローリング再起動)。Autopilot ではこの要求値がそのまま課金対象で、ノードは自動で用意されます。 |
+| ディスクの種別 (`storage_class`) | 変更 → `make db`。作成済みの PVC には適用されず、新しく増えた ordinal からです。Hyperdisk への切り替えは [Hyperdisk Balanced](#hyperdisk-balanced) を参照してください。 |
+| Hyperdisk の IOPS / スループット | `[postgres] hyperdisk_iops` などを変更 → `make db`。StorageClass は作り直されますが、作成済みのボリュームは変わりません (`gcloud compute disks update` で変更)。 |
+| Pod の配置 (`compute_class` / `machine_family`) | 変更 → `make db` (ローリング再起動)。移動先のノードが既存 PVC のディスク種別をアタッチできる必要があります。 |
 | リリースチャンネル | `[cluster] release_channel` を変更 → `make db`。無停止で反映されます (Autopilot / Standard 共通)。 |
 | ノード数 / オートスケール ※ | `[cluster] num_nodes` などを変更 → `make db`。ノードが増減するだけで **DB は無停止**です。 |
 | マシンタイプ / ノードのディスク ※ | `[cluster] machine_type` などを変更 → `make db`。**ノードのローリング置換**が走るため確認を求められます。PVC は保持されますが、ノードが少ない構成では DB が一時停止します。 |
@@ -396,7 +468,7 @@ $ POOLED=1 make alloydb-psql                         # プーラー経由で psq
 
 ※ は `mode = "standard"` のときだけの操作です。Autopilot ではノードのサイズ調整そのものが不要です。
 
-`storage_class` を変えた場合など `volumeClaimTemplates` に差分があるときは、Pod と PVC を残したまま (`--cascade=orphan`) StatefulSet だけを作り直します。既存の PVC はそのまま使われ、新しく増えた ordinal から新しい設定が適用されます。
+`storage_class` を変えた場合など `volumeClaimTemplates` に差分があるときは、Pod と PVC を残したまま (`--cascade=orphan`) StatefulSet だけを作り直します。既存の PVC はそのまま使われ、新しく増えた ordinal から新しい設定が適用されます (`make db` が該当する PVC を警告します)。
 
 ---
 
@@ -408,12 +480,15 @@ config.toml.template            設定のひな形 兼 デフォルト値の定�
 config.toml                     実際の設定 (gitignore)
 doc/
   alloydb-psc-setup.md          AlloyDB + PSC を gcloud で構築する手順書 (お客様向けの説明つき)
+docs/
+  hyperdisk-balanced-autopilot-n4.md  Hyperdisk Balanced を N4 / Performance コンピュートクラスで使うための調査メモ
 app/
   main.py                       サンプル Web アプリ (Flask + psycopg 3)。接続先は環境変数だけで決まる
   templates/index.html          画面 (上部に AlloyDB / PostgreSQL と接続プーリングのバナー)
   requirements.txt / Dockerfile コンテナイメージの定義
 manifests/
   *.yaml.tmpl                   ${CFG_*} を埋め込む Kubernetes マニフェスト (PostgreSQL)
+  05-storageclass.yaml.tmpl     Hyperdisk Balanced 用 StorageClass (storage_class = "hyperdisk-balanced" のときだけ)
   app/*.yaml.tmpl               サンプルアプリの Namespace / Secret / ConfigMap / Deployment / Service
   pg-scripts/
     init-01-app-user.sh         初回 initdb 時にアプリ用 / レプリケーション用ロールを作る
@@ -457,6 +532,8 @@ Standard ではノードのリソース不足がよくある原因です。`[pos
 
 Autopilot では要求に合うノードが用意されるまで 1〜2 分ほど `Pending` のままになります (初回はこれが普通です)。それ以上続く場合は `Events` を確認してください。Autopilot は Pod の要求値を最小値や CPU:メモリ比 (概ね 1:1〜1:6.5) に合わせて調整するため、`kubectl -n database describe pod postgres-0` に出る実際の要求値と `config.toml` の値がずれることがあります。`spot = true` の場合は Spot の空き容量待ちでも `Pending` になり得ます。
 
+Hyperdisk のボリュームを持つ Pod は、Hyperdisk をアタッチできるノード (N4 など) が用意されるまで `Pending` になります (Autopilot では StorageClass の `use-allowed-disk-topology` により自動で用意されますが、`spot = true` ならそのシリーズの Spot の空き容量待ちにもなり得ます)。Hyperdisk と Persistent Disk が混在すると、ノードがディスクをアタッチできずに `Pending` のままになります (例: `premium-rwo` で作った PVC を `machine_family = "n4"` の Pod に付ける)。`kubectl -n database get pvc` で各 PVC の `STORAGECLASS` を確認し、切り替え方は [Hyperdisk Balanced](#hyperdisk-balanced) を参照してください。`compute_class = "Performance"` では専用ノードの作成を待つほか、そのマシンシリーズの割り当て量 (quota) 不足でも `Pending` になります。
+
 **`kubectl apply` で Autopilot の警告が出る**
 
 ```console
@@ -497,7 +574,7 @@ $ kubectl -n database get pvc data-postgres-0 -o jsonpath='{.status.conditions}'
 $ kubectl -n database delete pod postgres-0
 ```
 
-そもそも拡張が始まらない場合は、StorageClass の `allowVolumeExpansion` が `true` である必要があります (GKE の `standard-rwo` / `premium-rwo` は既定で有効)。
+そもそも拡張が始まらない場合は、StorageClass の `allowVolumeExpansion` が `true` である必要があります (GKE の `standard-rwo` / `premium-rwo`、本ツールが作る `hyperdisk-balanced` はいずれも有効)。
 
 **`make app-image` (Cloud Build) が権限エラーで失敗する**
 

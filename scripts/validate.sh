@@ -7,14 +7,12 @@ require_cmd python3
 
 info "設定を検証しました (config.py によるスキーマ / 型 / 値のチェック)"
 
-info "マニフェストをレンダリングします"
-RENDER_ONLY=1 SKIP_CONTEXT_CHECK=1 "${REPO_ROOT}/scripts/deploy-db.sh" >/dev/null \
-  || die "レンダリングに失敗しました"
-RENDER_ONLY=1 "${REPO_ROOT}/scripts/deploy-app.sh" >/dev/null \
-  || die "サンプルアプリのマニフェストのレンダリングに失敗しました"
-
-info "YAML として解釈できるか検証します"
-if python3 -c "import yaml" 2>/dev/null; then
+# build/ の YAML がすべて解釈でき、apiVersion / kind / metadata を持つか
+check_yaml() {
+  if ! python3 -c "import yaml" 2>/dev/null; then
+    warn "PyYAML が無いため YAML パースの検証をスキップします (pip install pyyaml)"
+    return 0
+  fi
   python3 - "${BUILD_DIR}" <<'PY'
 import sys, pathlib, yaml
 build = pathlib.Path(sys.argv[1])
@@ -33,9 +31,31 @@ for path in files:
           f"({', '.join(d['kind'] for d in docs)})")
 print(f"  合計 {total} オブジェクト")
 PY
-else
-  warn "PyYAML が無いため YAML パースの検証をスキップします (pip install pyyaml)"
-fi
+}
+
+# Hyperdisk Balanced + 専用ノードの構成は config.toml が既定のままだと通らない経路なので、
+# 環境変数で上書きして必ず一度レンダリングする (StorageClass と nodeSelector の生成を確認)。
+info "Hyperdisk Balanced + 専用ノード構成でレンダリングできるか検証します"
+CFG_CLUSTER_MODE=autopilot \
+CFG_POSTGRES_STORAGE_CLASS=hyperdisk-balanced CFG_POSTGRES_STORAGE_SIZE=150Gi \
+CFG_POSTGRES_HYPERDISK_IOPS=10000 CFG_POSTGRES_HYPERDISK_THROUGHPUT=250 \
+CFG_POSTGRES_COMPUTE_CLASS=Performance CFG_POSTGRES_MACHINE_FAMILY=n4 \
+RENDER_ONLY=1 SKIP_CONTEXT_CHECK=1 "${REPO_ROOT}/scripts/deploy-db.sh" >/dev/null \
+  || die "Hyperdisk Balanced 構成のレンダリングに失敗しました"
+grep -q '"provisioned-iops-on-create": "10000"' "${BUILD_DIR}/05-storageclass.yaml" 2>/dev/null \
+  || die "05-storageclass.yaml に IOPS の指定がありません"
+grep -q '"use-allowed-disk-topology": "true"' "${BUILD_DIR}/05-storageclass.yaml" 2>/dev/null \
+  || die "05-storageclass.yaml に use-allowed-disk-topology の指定がありません"
+grep -q '"cloud.google.com/machine-family": "n4"' "${BUILD_DIR}/40-statefulset.yaml" \
+  || die "40-statefulset.yaml に machine-family の nodeSelector がありません"
+check_yaml
+
+info "マニフェストをレンダリングします (config.toml の構成)"
+RENDER_ONLY=1 SKIP_CONTEXT_CHECK=1 "${REPO_ROOT}/scripts/deploy-db.sh" >/dev/null \
+  || die "レンダリングに失敗しました"
+RENDER_ONLY=1 "${REPO_ROOT}/scripts/deploy-app.sh" >/dev/null \
+  || die "サンプルアプリのマニフェストのレンダリングに失敗しました"
+check_yaml
 
 info "Python スクリプトとサンプルアプリの構文を検証します"
 python3 - "${REPO_ROOT}" <<'PY'

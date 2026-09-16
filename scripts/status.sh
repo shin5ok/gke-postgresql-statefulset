@@ -50,12 +50,22 @@ fi
 ready="$(kc -n "${NS}" get statefulset "${NAME}" \
   -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)"
 
+storage_note="${CFG_POSTGRES_STORAGE_CLASS}"
+if [[ "${CFG_HYPERDISK}" == "true" ]]; then
+  storage_note="Hyperdisk Balanced"
+  [[ "${CFG_POSTGRES_HYPERDISK_IOPS}" != "0" ]] \
+    && storage_note+=", ${CFG_POSTGRES_HYPERDISK_IOPS} IOPS"
+  [[ "${CFG_POSTGRES_HYPERDISK_THROUGHPUT}" != "0" ]] \
+    && storage_note+=", ${CFG_POSTGRES_HYPERDISK_THROUGHPUT} MiB/s"
+fi
+
 cat <<INFO
 
 ${C_BOLD}接続情報${C_RESET}
   クラスタ        : ${CFG_CLUSTER_NAME} (${CFG_CLUSTER_LOCATION} / ${CFG_CLUSTER_MODE})
   Namespace       : ${NS}
   Ready レプリカ  : ${ready:-0} / ${CFG_POSTGRES_REPLICAS}
+  ストレージ      : ${CFG_POSTGRES_STORAGE_SIZE} x ${CFG_POSTGRES_REPLICAS} (${storage_note})
   データベース    : ${CFG_POSTGRES_DATABASE}
   ユーザ          : ${CFG_POSTGRES_USER}
   パスワード      : $(app_password)

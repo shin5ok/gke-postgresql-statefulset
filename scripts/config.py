@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -16,6 +17,8 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+from qty import parse as parse_quantity
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "config.toml.template"
@@ -104,6 +107,102 @@ ALLOYDB_N2_CPUS = (2, 4, 8, 16, 32, 64, 96, 128)
 ALLOYDB_VERSIONS = ("POSTGRES_14", "POSTGRES_15", "POSTGRES_16", "POSTGRES_17",
                     "POSTGRES_18")
 
+# この名前を postgres.storage_class に指定すると Hyperdisk Balanced 用の StorageClass を作る
+HYPERDISK_STORAGE_CLASS = "hyperdisk-balanced"
+# StorageClass の use-allowed-disk-topology (Hyperdisk 対応ノードへの自動配置) に必要な
+# GKE の最小バージョン。deploy-db.sh が適用前にクラスタとノードのバージョンを確認する。
+HYPERDISK_TOPOLOGY_MIN_GKE = "1.34.1-gke.2541000"
+# Hyperdisk Balanced をアタッチできないマシンシリーズ (Compute Engine の対応表より。
+# E2 / N1 / N2 / N2D / C2D はアカウントチームへの依頼が必要なため非対応として扱う)
+HYPERDISK_UNSUPPORTED_FAMILIES = ("a2", "c2", "c2d", "e2", "g2", "n1", "n2", "n2d",
+                                  "t2a", "t2d")
+# Persistent Disk を使えず、起動ディスクにも Hyperdisk Balanced が必要なマシンシリーズ
+# (Compute Engine の Persistent Disk 対応表より。Z3 は pd-balanced / pd-ssd を使える)
+HYPERDISK_ONLY_FAMILIES = ("c4", "c4a", "c4d", "c4n", "g4", "h4d", "m4", "m4n", "n4",
+                           "n4a", "n4d", "x4")
+# Autopilot の組み込みコンピュートクラス。postgres.compute_class にこれ以外の名前を書いた
+# 場合は、クラスタに作成したカスタム ComputeClass とみなす。
+AUTOPILOT_BUILTIN_COMPUTE_CLASSES = ("Performance", "Balanced", "Scale-Out", "Accelerator")
+# Hyperdisk Balanced をアタッチできないシリーズで動く組み込みクラス
+# (Balanced は N2 / N2D、Scale-Out は T2A / T2D)
+HYPERDISK_UNSUPPORTED_COMPUTE_CLASSES = ("Balanced", "Scale-Out")
+# Kubernetes のオブジェクト名 (DNS サブドメイン) / ラベルの値 / マシンシリーズ名
+K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")
+LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$")
+MACHINE_FAMILY_RE = re.compile(r"^[a-z][a-z0-9]{0,15}$")
+
+
+def size_gib(quantity: str) -> float:
+    """Kubernetes のリソース量 (20Gi / 100G ...) を GiB に換算する。"""
+    return parse_quantity(quantity) / 2**30
+
+
+def hyperdisk_default_iops(gib: float) -> int:
+    """IOPS を指定しなかったときに Compute Engine が Hyperdisk Balanced に与える既定値。"""
+    if gib <= 6:
+        return int(500 * gib)
+    return min(int(6 * gib) + 3000, 160_000)
+
+
+def is_custom_compute_class(name: str) -> bool:
+    """カスタム ComputeClass か。
+
+    カスタム ComputeClass を要求する Pod に cloud.google.com/machine-family や
+    cloud.google.com/gke-spot の nodeSelector を併記すると GKE が Pod を拒否する
+    (マシンシリーズや Spot は ComputeClass の priorities 側で指定する)。
+    """
+    return bool(name) and name not in AUTOPILOT_BUILTIN_COMPUTE_CLASSES
+
+
+def machine_family_of(machine_type: str) -> str:
+    """マシンタイプ (n4-standard-4) からシリーズ (n4) を取り出す。"""
+    return machine_type.split("-", 1)[0].lower()
+
+
+def validate_hyperdisk(cfg: dict, autopilot: bool) -> None:
+    """storage_class = "hyperdisk-balanced" のときの容量・性能・ノードの整合性を確認する。
+
+    値の範囲は Compute Engine の Hyperdisk Balanced の制限に合わせてある。範囲外の値は
+    PVC の作成時に初めて失敗して Pod が Pending のままになるため、ここで先に弾く。
+    """
+    cl, pg = cfg["cluster"], cfg["postgres"]
+    gib = size_gib(pg["storage_size"])
+    iops, throughput = pg["hyperdisk_iops"], pg["hyperdisk_throughput"]
+
+    if gib < 4:
+        die(f"Hyperdisk Balanced の最小容量は 4Gi です "
+            f"(postgres.storage_size: {pg['storage_size']!r})")
+    if iops:
+        if gib < 6:
+            die("postgres.hyperdisk_iops を指定するには postgres.storage_size を 6Gi 以上に"
+                "してください (4Gi / 5Gi は IOPS が固定です)")
+        max_iops = min(int(500 * gib), 160_000)
+        if not 3000 <= iops <= max_iops:
+            die(f"postgres.hyperdisk_iops は 3000 〜 {max_iops} です "
+                f"(上限は容量 1GiB あたり 500 IOPS、最大 160000) (指定値: {iops})")
+    if throughput:
+        provisioned = iops or hyperdisk_default_iops(gib)
+        low = max(140, provisioned // 256)
+        high = min(2400, provisioned // 4)
+        if not low <= throughput <= high:
+            die(f"postgres.hyperdisk_throughput は {low} 〜 {high} MiB/s です "
+                f"(IOPS {provisioned} の 1/256 〜 1/4、かつ 140 〜 2400 の範囲) "
+                f"(指定値: {throughput})")
+
+    # ボリュームをアタッチするノードのマシンシリーズが Hyperdisk に対応しているか
+    if autopilot:
+        if pg["compute_class"] in HYPERDISK_UNSUPPORTED_COMPUTE_CLASSES:
+            die(f"postgres.compute_class = {pg['compute_class']} のノード (Balanced は N2 / N2D、"
+                "Scale-Out は T2A / T2D) には Hyperdisk Balanced をアタッチできません。"
+                "compute_class を Performance か空にしてください")
+        family, where = pg["machine_family"], "postgres.machine_family"
+    else:
+        family = machine_family_of(cl["machine_type"])
+        where = f"cluster.machine_type ({cl['machine_type']})"
+    if family in HYPERDISK_UNSUPPORTED_FAMILIES:
+        die(f"{where} = {family} は Hyperdisk Balanced をアタッチできません。"
+            "N4 / C3 / C4 など対応するシリーズを指定してください")
+
 
 def validate(cfg: dict) -> None:
     gcp, cl, pg, ct = cfg["gcp"], cfg["cluster"], cfg["postgres"], cfg["content"]
@@ -148,6 +247,11 @@ def validate(cfg: dict) -> None:
         die(f"cluster.num_nodes は 1 以上です (指定値: {cl['num_nodes']})")
     if cl["disk_size_gb"] < 10:
         die(f"cluster.disk_size_gb は 10 以上です (指定値: {cl['disk_size_gb']})")
+    if not autopilot and machine_family_of(cl["machine_type"]) in HYPERDISK_ONLY_FAMILIES \
+            and cl["disk_type"] != "hyperdisk-balanced":
+        die(f"cluster.machine_type = {cl['machine_type']} は起動ディスクに Persistent Disk を"
+            f"使えません。cluster.disk_type = \"hyperdisk-balanced\" にしてください "
+            f"(指定値: {cl['disk_type']!r})")
     if cl["autoscaling"]:
         if cl["min_nodes"] < 0 or cl["max_nodes"] < cl["min_nodes"]:
             die(f"cluster.min_nodes ({cl['min_nodes']}) <= max_nodes "
@@ -165,6 +269,25 @@ def validate(cfg: dict) -> None:
     if not SIZE_RE.match(pg["storage_size"]):
         die(f"postgres.storage_size の書式が不正です (例: 20Gi / 100Gi)"
             f" (指定値: {pg['storage_size']!r})")
+    if not K8S_NAME_RE.match(pg["storage_class"]):
+        die(f"postgres.storage_class の書式が不正です (例: premium-rwo / hyperdisk-balanced) "
+            f"(指定値: {pg['storage_class']!r})")
+    for label in ("hyperdisk_iops", "hyperdisk_throughput"):
+        if pg[label] < 0:
+            die(f"postgres.{label} は 0 (既定値) か正の整数です (指定値: {pg[label]})")
+    if pg["compute_class"] and not LABEL_VALUE_RE.match(pg["compute_class"]):
+        die(f"postgres.compute_class の書式が不正です (例: Performance) "
+            f"(指定値: {pg['compute_class']!r})")
+    if pg["machine_family"] and not MACHINE_FAMILY_RE.match(pg["machine_family"]):
+        die(f"postgres.machine_family は n4 / c3 のような小文字のシリーズ名です "
+            f"(指定値: {pg['machine_family']!r})")
+    if autopilot and is_custom_compute_class(pg["compute_class"]) and pg["machine_family"]:
+        die(f"postgres.compute_class = {pg['compute_class']!r} はカスタム ComputeClass として扱うため、"
+            "postgres.machine_family と併用できません (nodeSelector に併記すると GKE が Pod を"
+            "拒否します)。マシンシリーズは ComputeClass の priorities[].machineFamily で指定し、"
+            "machine_family は空にしてください")
+    if pg["storage_class"] == HYPERDISK_STORAGE_CLASS:
+        validate_hyperdisk(cfg, autopilot)
     for label, value in (("cpu_request", pg["cpu_request"]),
                          ("cpu_limit", pg["cpu_limit"])):
         if not QTY_RE.match(value):
@@ -262,7 +385,33 @@ def derive(cfg: dict) -> dict:
     zonal = cl["mode"] == "standard" and cl["location_type"] == "zonal"
     location = gcp["zone"] if zonal else gcp["region"]
     # Autopilot にはノードプールが無いため、Spot は Pod 側で指定する
-    autopilot_spot = cl["mode"] == "autopilot" and cl["spot"]
+    autopilot = cl["mode"] == "autopilot"
+    autopilot_spot = autopilot and cl["spot"]
+    # PostgreSQL の Pod だけに付く nodeSelector。Spot に加えて、コンピュートクラスと
+    # マシンシリーズ (専用ノードや Hyperdisk 対応ノードへの配置) を指定できる。
+    # サンプルアプリや一時 Pod には付けない (Performance では Pod ごとにノードが作られるため)。
+    # カスタム ComputeClass では Spot をその priorities で指定する。gke-spot の nodeSelector を
+    # 併記すると GKE が Pod を拒否するため付けない (deploy-db.sh が警告を出す)。
+    custom_class = autopilot and is_custom_compute_class(pg["compute_class"])
+    pg_node_selector: dict[str, str] = {}
+    if autopilot_spot and not custom_class:
+        pg_node_selector["cloud.google.com/gke-spot"] = "true"
+    if autopilot and pg["compute_class"]:
+        pg_node_selector["cloud.google.com/compute-class"] = pg["compute_class"]
+    if autopilot and pg["machine_family"]:
+        pg_node_selector["cloud.google.com/machine-family"] = pg["machine_family"]
+    # Hyperdisk Balanced 用 StorageClass の parameters。
+    #   use-allowed-disk-topology … Hyperdisk をアタッチできるノードにだけ Pod を配置させる。
+    #       これがあれば nodeSelector で machine_family を指定しなくても、Autopilot が対応する
+    #       マシンシリーズのノードを用意する (GKE 1.34.1-gke.2541000 以降)。
+    #   IOPS / スループットは 0 のものは書かず、Compute Engine の既定値 (容量から決まる) に任せる。
+    storage_class_params = {"type": HYPERDISK_STORAGE_CLASS,
+                            "use-allowed-disk-topology": "true"}
+    if pg["hyperdisk_iops"]:
+        storage_class_params["provisioned-iops-on-create"] = str(pg["hyperdisk_iops"])
+    if pg["hyperdisk_throughput"]:
+        storage_class_params["provisioned-throughput-on-create"] = \
+            f"{pg['hyperdisk_throughput']}Mi"
     return {
         "CLUSTER_LOCATION": location,
         # gcloud に渡すロケーション指定フラグ
@@ -281,6 +430,16 @@ def derive(cfg: dict) -> dict:
         # Spot の toleration を持つ Pod は Autopilot では猶予期間が最大 25 秒。
         # 超える値を書くと 25 秒に切り下げられ、やはり警告が出る。
         "POD_TERMINATION_GRACE": "25" if autopilot_spot else "60",
+        # PostgreSQL の Pod の nodeSelector (Spot + compute_class + machine_family)
+        "PG_NODE_SELECTOR_JSON": json.dumps(pg_node_selector),
+        # postgres.compute_class がカスタム ComputeClass か (Spot の nodeSelector を付けない)
+        "PG_CUSTOM_COMPUTE_CLASS": "true" if custom_class else "false",
+        # storage_class = "hyperdisk-balanced" のとき 05-storageclass.yaml を生成・適用する
+        "HYPERDISK": "true" if pg["storage_class"] == HYPERDISK_STORAGE_CLASS else "false",
+        # その StorageClass の parameters (YAML のフローマッピングとして埋め込む)
+        "STORAGE_CLASS_PARAMS_JSON": json.dumps(storage_class_params),
+        # use-allowed-disk-topology を使うのに必要な GKE の最小バージョン (deploy-db.sh が確認)
+        "HYPERDISK_MIN_GKE_VERSION": HYPERDISK_TOPOLOGY_MIN_GKE,
         # gcloud container clusters get-credentials が作る context 名
         "KUBE_CONTEXT": f"gke_{gcp['project']}_{location}_{cl['name']}",
         # StatefulSet の ordinal 0 (プライマリ) の FQDN

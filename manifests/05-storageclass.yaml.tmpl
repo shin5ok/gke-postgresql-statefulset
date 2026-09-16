@@ -1,0 +1,28 @@
+# Hyperdisk Balanced 用の StorageClass。postgres.storage_class = "hyperdisk-balanced" の
+# ときだけ作成される。容量とは独立に IOPS / スループットをプロビジョニングできる
+# (postgres.hyperdisk_iops / hyperdisk_throughput。0 なら容量から決まる既定値)。
+#
+# parameters は作成後に変更できない (apply が Forbidden で失敗する)。値を変えると
+# deploy-db.sh が StorageClass を作り直すが、プロビジョニング済みのボリュームは
+# 作成時の値のまま動き続ける。
+#
+# use-allowed-disk-topology: "true" を parameters に入れてあるため、この StorageClass の
+# PVC を使う Pod は Hyperdisk をアタッチできるノード (N4 / C3 / C4 など) にだけ配置される。
+# Autopilot ではそのノードが自動で用意されるので、StatefulSet 側に nodeSelector は要らない
+# (GKE 1.34.1-gke.2541000 以降。deploy-db.sh が適用前にバージョンを確認する)。
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ${CFG_POSTGRES_STORAGE_CLASS}
+  labels:
+    app.kubernetes.io/managed-by: gke-postgresql-statefulset
+# GKE の Compute Engine Persistent Disk CSI ドライバ (Hyperdisk もこのドライバが扱う)
+provisioner: pd.csi.storage.gke.io
+# Pod がノードに割り当てられるまでプロビジョニングを待つ。ゾーンの不一致や
+# Hyperdisk 非対応ノードへのアタッチ失敗を防ぐため必須。
+volumeBindingMode: WaitForFirstConsumer
+# postgres.storage_size を増やしたときに PVC を拡張できるようにする
+allowVolumeExpansion: true
+# type / use-allowed-disk-topology に加えて、指定時のみ provisioned-iops-on-create /
+# provisioned-throughput-on-create
+parameters: ${CFG_STORAGE_CLASS_PARAMS_JSON}

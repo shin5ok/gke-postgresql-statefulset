@@ -36,11 +36,13 @@ spec:
       # Spot Pod では Autopilot の上限が 25 秒 (超えると切り下げ + 警告)。
       # それ以外は 60 秒。
       terminationGracePeriodSeconds: ${CFG_POD_TERMINATION_GRACE}
-      # Autopilot で cluster.spot = true のときだけ Spot Pod として起動する。
-      # (それ以外は {} / [] = 制約なし)
-      # toleration は Autopilot が自動で足すが、書いておかないと apply のたびに
+      # Autopilot のときだけ入る配置の指定 (それ以外は {} / [] = 制約なし)。
+      #   cluster.spot = true      … Spot Pod (cloud.google.com/gke-spot)
+      #   postgres.compute_class   … コンピュートクラス (Performance なら Pod ごとに専用ノード)
+      #   postgres.machine_family  … マシンシリーズ (Hyperdisk Balanced なら n4 / c3 / c4 など)
+      # Spot の toleration は Autopilot が自動で足すが、書いておかないと apply のたびに
       # mutating webhook の警告が出るため明示する。
-      nodeSelector: ${CFG_POD_NODE_SELECTOR_JSON}
+      nodeSelector: ${CFG_PG_NODE_SELECTOR_JSON}
       tolerations: ${CFG_POD_TOLERATIONS_JSON}
       securityContext:
         runAsUser: ${CFG_PG_UID}
@@ -202,6 +204,7 @@ spec:
           app.kubernetes.io/managed-by: gke-postgresql-statefulset
       spec:
         accessModes: ["ReadWriteOnce"]
+        # "hyperdisk-balanced" のときは 05-storageclass.yaml で作る StorageClass を指す
         storageClassName: ${CFG_POSTGRES_STORAGE_CLASS}
         resources:
           requests:
